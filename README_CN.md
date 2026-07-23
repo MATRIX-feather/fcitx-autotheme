@@ -6,7 +6,7 @@
 
 ## AI
 
-该项目全程使用AI制作：ChatGPT制作脚本的核心部分，DeepSeek V4 Pro + [OpenCode](https://github.com/anomalyco/opencode) + [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) 负责 Rust 部分和 README。
+该项目全程使用AI制作：ChatGPT制作脚本的核心部分，DeepSeek V4 Pro + [OpenCode](https://github.com/anomalyco/opencode) + [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) 负责 Rust 部分和 README。README有经过人工修改。
 
 需要注意的事，我没有 Rust 编程经验（事实上，几乎一点都没学 :D），所以不能保证该项目不会出一些很傻缺的问题。
 

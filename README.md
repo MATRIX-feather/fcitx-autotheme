@@ -7,7 +7,7 @@ This project is made because at the time being, fcitx5 in flatpak doesn't automa
 
 ## AI
 
-This project uses AI all the way: ChatGPT for the core part of the script, and DeepSeek V4 Pro + [OpenCode](https://github.com/anomalyco/opencode) + [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) for the Rust part and README.
+This project uses AI all the way: ChatGPT for the core part of the script, and DeepSeek V4 Pro + [OpenCode](https://github.com/anomalyco/opencode) + [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) for the Rust part and README. README contains manual changes.
 
 One thing to note is that I have no Rust programming experience (in fact, I've learned almost nothing :D), so I can't guarantee that this project won't have some silly problems.
 
