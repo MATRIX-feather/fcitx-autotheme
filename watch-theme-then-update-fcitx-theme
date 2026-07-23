@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+# This is the original script that watch the color scheme then run the generator.
+
+readonly APPNAME="$(basename $0) at $(realpath $0)"
+
+function doExit()
+{
+    echo "$APPNAME: Script exit."
+    exit 0;
+}
+
+trap doExit SIGTERM
+trap doExit SIGINT
+
+echo "$APPNAME: Started"
+
+# Thanks ChatGPT
+dbus-monitor "type='signal',interface='org.freedesktop.portal.Settings',member='SettingChanged'" \
+    |   grep --line-buffered ColorScheme \
+    |   while read -r line; do
+            # 在这里执行你的脚本
+            fcitx5-plasma-theme-generator -o ~/.var/app/org.fcitx.Fcitx5/data/fcitx5/themes/plasma
+            qdbus org.fcitx.Fcitx5 /controller org.fcitx.Fcitx.Controller1.ReloadAddonConfig 'classicui'
+        done
+
+doExit;
