@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -56,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("fcitx_autotheme=info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_ansi(std::io::stdout().is_terminal())
         .try_init()
         .map_err(|e| anyhow::anyhow!("failed to initialize tracing subscriber: {e}"))?;
 
