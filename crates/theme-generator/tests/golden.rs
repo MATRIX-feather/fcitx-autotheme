@@ -252,3 +252,63 @@ fn golden_highlight_is_200x200_with_hover_content() {
     let opaque = highlight.pixels().filter(|p| p.0[3] > 0).count();
     assert!(opaque > 10_000, "highlight mostly empty: {opaque}");
 }
+
+#[test]
+fn accent_color_overrides_highlight_background() {
+    let colors = tempfile::NamedTempFile::new().expect("colors fixture");
+    std::fs::write(colors.path(), FIXTURE_COLORS).expect("write fixture");
+    let out = tempfile::tempdir().expect("out dir");
+    ThemeGenerator::new(out.path())
+        .with_theme_name("default")
+        .with_colors_file(colors.path())
+        .with_accent_color(theme_generator::colors::Color::opaque(0x12, 0x34, 0x56))
+        .generate()
+        .expect("generate");
+    let conf = std::fs::read_to_string(out.path().join("theme.conf")).expect("read conf");
+    assert!(
+        conf.contains("HighlightBackgroundColor=#123456"),
+        "accent must drive HighlightBackgroundColor:\n{conf}"
+    );
+    // Non-accent colors are untouched.
+    assert!(
+        conf.contains("NormalColor=#aabbcc"),
+        "non-accent colors must be unchanged:\n{conf}"
+    );
+}
+
+#[test]
+fn accent_color_recolors_decoration_pngs() {
+    let colors = tempfile::NamedTempFile::new().expect("colors fixture");
+    std::fs::write(colors.path(), FIXTURE_COLORS).expect("write fixture");
+    let accent = theme_generator::colors::Color::opaque(0xe9, 0x3d, 0x58);
+
+    let out = tempfile::tempdir().expect("out dir");
+    ThemeGenerator::new(out.path())
+        .with_theme_name("default")
+        .with_colors_file(colors.path())
+        .with_accent_color(accent)
+        .generate()
+        .expect("generate");
+
+    // Breeze's viewitem hover frame paints with `ColorScheme-ButtonFocus`,
+    // which resolves through the fallback chain to Window DecorationFocus;
+    // the accent must recolor the rendered frame.
+    let highlight = read_png(&out.path().join("highlight.png"));
+    let center = highlight.get_pixel(100, 100).0;
+    assert!(center[3] > 0, "hover center must be visible");
+    assert!(
+        center[0].abs_diff(0xe9) <= 2
+            && center[1].abs_diff(0x3d) <= 2
+            && center[2].abs_diff(0x58) <= 2,
+        "highlight center must be the accent color, got {center:?}"
+    );
+
+    // The radiobutton outer ring uses the same role; its pixels must shift
+    // from the scheme's Window DecorationFocus (#556677, r<=87) to
+    // accent-driven tones (red-dominant).
+    let radio = read_png(&out.path().join("radio.png"));
+    assert!(
+        radio.pixels().any(|p| p.0[3] > 0 && p.0[0] >= 150),
+        "radio must contain accent-driven (red-dominant) pixels"
+    );
+}

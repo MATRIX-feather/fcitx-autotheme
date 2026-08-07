@@ -401,6 +401,30 @@ impl ColorScheme {
             highlight_background: self.named_color(StyleSheetColor::Highlight),
         }
     }
+
+    /// Return a copy of this scheme with the accent-driven roles overridden.
+    ///
+    /// The desktop accent color drives the `Highlight` role (Selection
+    /// `Background`, used by theme.conf and `.ColorScheme-Highlight`) and the
+    /// decoration roles (`.ColorScheme-*Focus`/`*Hover`). Decoration roles
+    /// resolve through the `KColorScheme` fallback chain starting at the
+    /// Window group — Breeze's viewitem hover/selected frames and checkmarks
+    /// radiobutton use `ColorScheme-ButtonFocus`, which falls back to Window
+    /// `DecorationFocus`. Injecting the accent into both groups makes the
+    /// generated PNGs and colors honor it, matching how KDE synthesizes an
+    /// accent at runtime.
+    #[must_use]
+    pub fn with_accent_color(mut self, accent: Color) -> Self {
+        self.groups
+            .entry(ColorGroup::Selection)
+            .or_default()
+            .insert(ColorKey::Background, accent);
+        self.groups
+            .entry(ColorGroup::Window)
+            .or_default()
+            .insert(ColorKey::DecorationFocus, accent);
+        self
+    }
 }
 
 /// The three colors written into `theme.conf`.
@@ -659,6 +683,13 @@ pub fn load_active_color_scheme() -> Result<ColorScheme, Error> {
         return ColorScheme::from_file(&path);
     }
     ColorScheme::parse(&text, &kdeglobals)
+}
+
+/// Load the color scheme named by the D-Bus signal, falling back to the
+/// active scheme when `name` is absent or cannot be resolved on disk.
+pub fn load_scheme_for_name(name: Option<&str>) -> Result<ColorScheme, Error> {
+    name.and_then(find_color_scheme_file)
+        .map_or_else(load_active_color_scheme, |path| ColorScheme::from_file(&path))
 }
 
 /// Path of the user's `kdeglobals` file.

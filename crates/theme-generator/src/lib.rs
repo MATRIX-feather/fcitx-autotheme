@@ -28,7 +28,7 @@ pub mod theme_resolver;
 
 use std::path::{Path, PathBuf};
 
-use colors::{style_sheet, ColorScheme, ThemeConfColors};
+use colors::{style_sheet, Color, ColorScheme, ThemeConfColors};
 use image::RgbaImage;
 use svg::PlasmaSvg;
 use theme_resolver::Theme;
@@ -142,6 +142,10 @@ pub struct ThemeGenerator {
     grid_unit: u32,
     /// Override for the active color scheme (tests / custom setups).
     colors_file: Option<PathBuf>,
+    /// Color scheme name from the watcher, pinned when it can be resolved.
+    color_scheme_name: Option<String>,
+    /// Desktop accent color override for the Highlight role.
+    accent_color: Option<Color>,
 }
 
 impl ThemeGenerator {
@@ -153,6 +157,8 @@ impl ThemeGenerator {
             theme_name: None,
             grid_unit: 19,
             colors_file: None,
+            color_scheme_name: None,
+            accent_color: None,
         }
     }
 
@@ -167,6 +173,22 @@ impl ThemeGenerator {
     #[must_use]
     pub fn with_colors_file(mut self, path: impl Into<PathBuf>) -> Self {
         self.colors_file = Some(path.into());
+        self
+    }
+
+    /// Pin the color scheme by name; by default the active scheme is used.
+    /// When the name cannot be resolved on disk, the active scheme is used.
+    #[must_use]
+    pub fn with_color_scheme_name(mut self, name: impl Into<String>) -> Self {
+        self.color_scheme_name = Some(name.into());
+        self
+    }
+
+    /// Override the theme's Highlight (accent) color. When absent, the color
+    /// scheme's own highlight color is used.
+    #[must_use]
+    pub const fn with_accent_color(mut self, accent: Color) -> Self {
+        self.accent_color = Some(accent);
         self
     }
 
@@ -186,11 +208,20 @@ impl ThemeGenerator {
         // (Plasma::Theme). Both fall back to the active scheme.
         let active_scheme = match &self.colors_file {
             Some(path) => ColorScheme::from_file(path)?,
-            None => colors::load_active_color_scheme()?,
+            None => colors::load_scheme_for_name(self.color_scheme_name.as_deref())?,
         };
         let theme_conf_scheme = match &theme.colors_file {
             Some(path) => ColorScheme::from_file(path)?,
             None => active_scheme.clone(),
+        };
+        // The desktop accent color overrides the Highlight role in both the
+        // SVG stylesheet and the theme.conf colors.
+        let (active_scheme, theme_conf_scheme) = match self.accent_color {
+            Some(accent) => (
+                active_scheme.with_accent_color(accent),
+                theme_conf_scheme.with_accent_color(accent),
+            ),
+            None => (active_scheme, theme_conf_scheme),
         };
         let theme_colors: ThemeConfColors = theme_conf_scheme.theme_conf_colors();
         let css = style_sheet(&active_scheme);
