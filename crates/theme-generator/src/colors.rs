@@ -141,6 +141,68 @@ pub enum ColorKey {
     Frame,
 }
 
+/// Convert sRGB channels to HSL, each in `[0, 1]`.
+fn rgb_to_hsl((r, g, b): (u8, u8, u8)) -> (f32, f32, f32) {
+    let r = f32::from(r) / 255.0;
+    let g = f32::from(g) / 255.0;
+    let b = f32::from(b) / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let lightness = (max + min) / 2.0;
+    if max == min {
+        return (0.0, 0.0, lightness);
+    }
+    let delta = max - min;
+    let saturation = if lightness > 0.5 {
+        delta / (2.0 - max - min)
+    } else {
+        delta / (max + min)
+    };
+    let hue = if max == r {
+        (g - b) / delta + if g < b { 6.0 } else { 0.0 }
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    (hue / 6.0, saturation, lightness)
+}
+
+/// One sixth of the HSL hue-to-rgb interpolation.
+fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+    if t < 0.0 {
+        t += 1.0;
+    }
+    if t > 1.0 {
+        t -= 1.0;
+    }
+    if t < 1.0 / 6.0 {
+        p + (q - p) * 6.0 * t
+    } else if t < 0.5 {
+        q
+    } else if t < 2.0 / 3.0 {
+        p + (q - p) * (2.0 / 3.0 - t) * 6.0
+    } else {
+        p
+    }
+}
+
+/// Convert HSL (each in `[0, 1]`) back to sRGB channels.
+fn hsl_to_rgb((hue, saturation, lightness): (f32, f32, f32)) -> (u8, u8, u8) {
+    if saturation <= 0.0 {
+        let value = (lightness * 255.0).round().clamp(0.0, 255.0) as u8;
+        return (value, value, value);
+    }
+    let q = if lightness < 0.5 {
+        lightness * (1.0 + saturation)
+    } else {
+        lightness + saturation - lightness * saturation
+    };
+    let p = 2.0 * lightness - q;
+    let channel = |t: f32| (hue_to_rgb(p, q, t) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (channel(hue + 1.0 / 3.0), channel(hue), channel(hue - 1.0 / 3.0))
+}
+
 /// Parse a color value: `#rrggbb`, `#rrggbbaa`, or `r,g,b`.
 fn parse_color(path: &Path, key: &str, value: &str) -> Result<Color, Error> {
     let value = value.trim();
@@ -443,37 +505,46 @@ impl ColorScheme {
         self
     }
 
-    /// Darken the highlight-driven roles by `percent` percent (0 = unchanged,
-    /// 10 = 10% darker).
+    /// Deepen the highlight-driven roles by `percent` percent (0 = unchanged,
+    /// 10 = 10% darker and 10% more saturated).
     ///
     /// The decoration roles (`.ColorScheme-*Focus`/`*Hover`, which color
     /// highlight.png and radio.png) and the `Highlight` role (theme.conf
-    /// `HighlightBackgroundColor`) are scaled toward black. Text, panel
-    /// backgrounds and other roles are left untouched so contrast is kept.
+    /// `HighlightBackgroundColor`) are darkened toward black and their
+    /// saturation is boosted by the same percentage. Text, panel backgrounds
+    /// and other roles are left untouched so contrast is kept.
     #[must_use]
-    pub fn with_highlight_darkening(mut self, percent: u8) -> Self {
+    pub fn with_highlight_deepening(mut self, percent: u8) -> Self {
         if percent == 0 {
             return self;
         }
         let scale = 100 - u16::from(percent);
-        let darken = |color: &mut Color| {
-            color.r = ((u16::from(color.r) * scale) / 100) as u8;
-            color.g = ((u16::from(color.g) * scale) / 100) as u8;
-            color.b = ((u16::from(color.b) * scale) / 100) as u8;
+        let saturation_factor = 1.0 + f32::from(percent) / 100.0;
+        let deepen = |color: &mut Color| {
+            let (r, g, b) = (
+                ((u16::from(color.r) * scale) / 100) as u8,
+                ((u16::from(color.g) * scale) / 100) as u8,
+                ((u16::from(color.b) * scale) / 100) as u8,
+            );
+            let (hue, saturation, lightness) = rgb_to_hsl((r, g, b));
+            let (r, g, b) = hsl_to_rgb((hue, (saturation * saturation_factor).min(1.0), lightness));
+            color.r = r;
+            color.g = g;
+            color.b = b;
         };
         // The Highlight role: `[Colors:Selection] Background`.
         if let Some(selection) = self.groups.get_mut(&ColorGroup::Selection)
             && let Some(background) = selection.get_mut(&ColorKey::Background)
         {
-            darken(background);
+            deepen(background);
         }
         // Decoration roles in every color set.
         for group in self.groups.values_mut() {
             if let Some(focus) = group.get_mut(&ColorKey::DecorationFocus) {
-                darken(focus);
+                deepen(focus);
             }
             if let Some(hover) = group.get_mut(&ColorKey::DecorationHover) {
-                darken(hover);
+                deepen(hover);
             }
         }
         self
@@ -908,36 +979,37 @@ mod tests {
     }
 
     #[test]
-    fn highlight_darkening_scopes_decoration_and_highlight() {
+    fn highlight_deepening_scopes_decoration_and_highlight() {
         let text = "[Colors:Window]\nBackground=#ffffff\nDecorationFocus=#aaaaaa\nDecorationHover=#bbbbbb\n[Colors:Selection]\nBackground=#ff8800\nForeground=#ffffff\n";
         let scheme = ColorScheme::parse(text, Path::new("test")).expect("parse");
-        let dark = scheme.clone().with_highlight_darkening(10);
+        let deep = scheme.clone().with_highlight_deepening(10);
         // Decoration roles (ButtonFocus colors highlight.png/radio.png) are
-        // scaled toward black by 10%.
+        // scaled toward black by 10%; gray and fully-saturated colors keep
+        // their channel values after the saturation boost.
         assert_eq!(
-            dark.named_color(StyleSheetColor::ButtonFocus),
+            deep.named_color(StyleSheetColor::ButtonFocus),
             Color::opaque(0x99, 0x99, 0x99)
         );
         assert_eq!(
-            dark.named_color(StyleSheetColor::ButtonHover),
+            deep.named_color(StyleSheetColor::ButtonHover),
             Color::opaque(0xa8, 0xa8, 0xa8)
         );
-        // The Highlight role (Selection Background) is darkened too.
+        // The Highlight role (Selection Background) is deepened too.
         assert_eq!(
-            dark.named_color(StyleSheetColor::Highlight),
+            deep.named_color(StyleSheetColor::Highlight),
             Color::opaque(0xe5, 0x7a, 0x00)
         );
         // Everything else stays as-is: panel background, text and the
         // highlighted text keep their original colors for contrast.
         assert_eq!(
-            dark.named_color(StyleSheetColor::Background),
+            deep.named_color(StyleSheetColor::Background),
             Color::opaque(0xff, 0xff, 0xff)
         );
         assert_eq!(
-            dark.named_color(StyleSheetColor::HighlightedText),
+            deep.named_color(StyleSheetColor::HighlightedText),
             Color::opaque(0xff, 0xff, 0xff)
         );
         // Zero percent is a no-op.
-        assert_eq!(scheme.named_color(StyleSheetColor::ButtonFocus), scheme.with_highlight_darkening(0).named_color(StyleSheetColor::ButtonFocus));
+        assert_eq!(scheme.named_color(StyleSheetColor::ButtonFocus), scheme.with_highlight_deepening(0).named_color(StyleSheetColor::ButtonFocus));
     }
 }

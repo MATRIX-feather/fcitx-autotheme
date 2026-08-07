@@ -146,9 +146,10 @@ pub struct ThemeGenerator {
     color_scheme_name: Option<String>,
     /// Desktop accent color override for the Highlight role.
     accent_color: Option<Color>,
-    /// Darken highlight-driven colors (decoration roles + Highlight) by this
-    /// many percent (0 = unchanged).
-    highlight_darken_percent: u8,
+    /// Deepen highlight-driven colors (decoration roles + Highlight) by this
+    /// many percent (0 = unchanged): darkened and saturated by the same
+    /// percentage.
+    highlight_deepen_percent: u8,
 }
 
 impl ThemeGenerator {
@@ -162,7 +163,7 @@ impl ThemeGenerator {
             colors_file: None,
             color_scheme_name: None,
             accent_color: None,
-            highlight_darken_percent: 10,
+            highlight_deepen_percent: 10,
         }
     }
 
@@ -196,16 +197,16 @@ impl ThemeGenerator {
         self
     }
 
-    /// Darken the highlight-driven colors by `percent` percent (0 = unchanged,
-    /// 10 = 10% darker).
+    /// Deepen the highlight-driven colors by `percent` percent (0 = unchanged,
+    /// 10 = 10% darker and 10% more saturated).
     ///
     /// Applies to the decoration roles (`.ColorScheme-*Focus`/`*Hover`,
     /// coloring highlight.png and radio.png) and the `Highlight` role
     /// (theme.conf `HighlightBackgroundColor`), in both the rendered PNGs and
     /// the config colors. Defaults to 10.
     #[must_use]
-    pub const fn with_highlight_darkening(mut self, percent: u8) -> Self {
-        self.highlight_darken_percent = percent;
+    pub const fn with_highlight_deepening(mut self, percent: u8) -> Self {
+        self.highlight_deepen_percent = percent;
         self
     }
 
@@ -240,11 +241,11 @@ impl ThemeGenerator {
             ),
             None => (active_scheme, theme_conf_scheme),
         };
-        // Darken highlight-driven colors (decoration roles + Highlight) in both
+        // Deepen highlight-driven colors (decoration roles + Highlight) in both
         // the stylesheet (PNGs) and the theme.conf colors.
         let (active_scheme, theme_conf_scheme) = (
-            active_scheme.with_highlight_darkening(self.highlight_darken_percent),
-            theme_conf_scheme.with_highlight_darkening(self.highlight_darken_percent),
+            active_scheme.with_highlight_deepening(self.highlight_deepen_percent),
+            theme_conf_scheme.with_highlight_deepening(self.highlight_deepen_percent),
         );
         let theme_colors: ThemeConfColors = theme_conf_scheme.theme_conf_colors();
         let css = style_sheet(&active_scheme);

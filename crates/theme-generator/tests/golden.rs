@@ -266,8 +266,8 @@ fn accent_color_overrides_highlight_background() {
         .expect("generate");
     let conf = std::fs::read_to_string(out.path().join("theme.conf")).expect("read conf");
     assert!(
-        conf.contains("HighlightBackgroundColor=#102e4d"),
-        "accent must drive HighlightBackgroundColor (darkened 10%):\n{conf}"
+        conf.contains("HighlightBackgroundColor=#0d2e50"),
+        "accent must drive HighlightBackgroundColor (deepened 10%):\n{conf}"
     );
     // Non-accent colors are untouched.
     assert!(
@@ -292,15 +292,15 @@ fn accent_color_recolors_decoration_pngs() {
 
     // Breeze's viewitem hover frame paints with `ColorScheme-ButtonFocus`
     // (the accent is injected into the Button set too); the rendered frame
-    // must carry the accent, darkened 10% (#e93d58 -> #d1364f).
+    // must carry the accent, deepened 10% (#e93d58 -> #d92e4a).
     let highlight = read_png(&out.path().join("highlight.png"));
     let center = highlight.get_pixel(100, 100).0;
     assert!(center[3] > 0, "hover center must be visible");
     assert!(
-        center[0].abs_diff(0xd1) <= 2
-            && center[1].abs_diff(0x36) <= 2
-            && center[2].abs_diff(0x4f) <= 2,
-        "highlight center must be the darkened accent color, got {center:?}"
+        center[0].abs_diff(0xd9) <= 2
+            && center[1].abs_diff(0x2e) <= 2
+            && center[2].abs_diff(0x4a) <= 2,
+        "highlight center must be the deepened accent color, got {center:?}"
     );
 
     // The radiobutton outer ring uses the same role; its pixels must shift
