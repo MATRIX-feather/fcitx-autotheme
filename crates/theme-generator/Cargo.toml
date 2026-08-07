@@ -1,0 +1,26 @@
+[package]
+name = "theme-generator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/MATRIX-feather/fcitx-autotheme"
+keywords = ["fcitx5", "plasma", "theme"]
+categories = ["command-line-utilities", "gui"]
+readme = "../../README.md"
+description = "Generate fcitx5 classicui themes from a Plasma theme (reimplementation of fcitx5-plasma-theme-generator)"
+
+[dependencies]
+dirs.workspace = true
+flate2.workspace = true
+image.workspace = true
+resvg.workspace = true
+roxmltree = "0.20"
+thiserror.workspace = true
+usvg.workspace = true
+xmlwriter = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

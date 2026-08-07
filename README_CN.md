@@ -14,11 +14,22 @@
 
 当你切换 Plasma 配色方案或全局主题时，`fcitx-autotheme` 会通过 D-Bus 检测到变化，然后：
 
-1. 运行 `fcitx5-plasma-theme-generator` 生成匹配的 fcitx5 主题
+1. 进程内生成匹配的 fcitx5 classicui 主题
 2. 重新加载 fcitx5 的 `classicui` 插件，使新主题立即生效
 
 这是对[原始 bash 脚本](watch-theme-then-update-fcitx-theme)的完整 Rust 复刻，
 使用原生异步 I/O、优雅的退出处理和信号防抖机制。
+
+主题生成本身是 `fcitx5-plasma-theme-generator`（fcitx5-configtool 的 KCM 工具）
+的 Rust 移植：解析当前 Plasma 主题的配色方案，将主题的 SVG 帧渲染成 PNG，并写出 `theme.conf`。
+
+## 工作区结构
+
+```
+crates/
+├── autotheme/        # D-Bus 监听守护进程（二进制：fcitx-autotheme）
+└── theme-generator/  # 进程内 Plasma → fcitx5 主题生成器（库）
+```
 
 ## 构建
 
@@ -28,7 +39,6 @@ cargo build --release
 
 ### 依赖
 
-- `fcitx5-plasma-theme-generator`（可通过包管理器或 AUR 安装）
 - 运行中的 D-Bus 会话总线
 - KDE Plasma 桌面环境（用于监听相应的 D-Bus 信号）
 
@@ -62,6 +72,17 @@ fcitx-autotheme --wait-time 500
 这避免了多个设置同时变化（例如同时切换配色方案和 Plasma 主题）时的重复处理。
 
 收到退出信号（SIGINT / SIGTERM）时，守护进程会优雅退出。
+
+## 生成器工作原理
+
+`theme-generator` 复刻 `fcitx5-plasma-theme-generator` 的算法
+（上游：fcitx/fcitx5-configtool，`src/plasmathemegenerator/main.cpp`，GPL-2.0-or-later）：
+
+1. 解析当前 Plasma 主题及其配色方案（主题的 `colors` 文件，或来自 `kdeglobals` / `.colors` 的活动配色）
+2. 加载主题的 SVG（`dialogs/background`、`widgets/viewitem`、`widgets/arrows` 等），
+   将配色注入 `current-color-scheme` 样式块，用 usvg/resvg 把 9-slice 帧渲染成 PNG
+   （`panel.png`、`mask.png`、`highlight.png`、图标）
+3. 以 fcitx5 classicui 格式写出 `theme.conf`
 
 ## 许可证
 

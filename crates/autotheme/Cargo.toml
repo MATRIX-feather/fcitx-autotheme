@@ -1,0 +1,24 @@
+[package]
+name = "fcitx-autotheme"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/MATRIX-feather/fcitx-autotheme"
+keywords = ["fcitx5", "plasma", "theme"]
+categories = ["command-line-utilities", "gui"]
+readme = "../../README.md"
+description = "Watch XDG Desktop Portal color-scheme changes and update fcitx5 theme"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+dirs.workspace = true
+futures-util.workspace = true
+theme-generator = { path = "../theme-generator" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zbus.workspace = true
+
+[lints]
+workspace = true

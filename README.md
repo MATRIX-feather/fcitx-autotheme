@@ -16,11 +16,22 @@ One thing to note is that I have no Rust programming experience (in fact, I've l
 Whenever you switch your Plasma color scheme or global theme, `fcitx-autotheme`
 detects the change via D-Bus and:
 
-1. Runs `fcitx5-plasma-theme-generator` to generate a matching fcitx5 theme
+1. Generates a matching fcitx5 classicui theme in-process
 2. Reloads the fcitx5 `classicui` addon so the new theme takes effect immediately
 
 This replicates the behavior of the [original bash script](watch-theme-then-update-fcitx-theme),
 but in Rust with proper async I/O, graceful shutdown, and debounced signal handling.
+The theme generation itself is a Rust port of `fcitx5-plasma-theme-generator`
+(the fcitx5-configtool KCM utility): it resolves the active Plasma theme's
+color scheme, renders the theme's SVG frames to PNGs, and writes `theme.conf`.
+
+## Workspace layout
+
+```
+crates/
+├── autotheme/        # the D-Bus watcher daemon (binary: fcitx-autotheme)
+└── theme-generator/  # in-process Plasma → fcitx5 theme generator (library)
+```
 
 ## Build this project
 
@@ -30,7 +41,6 @@ cargo build --release
 
 ### Prerequisites
 
-- `fcitx5-plasma-theme-generator` (available in your package manager or AUR)
 - A running D-Bus session bus
 - KDE Plasma desktop (for the D-Bus signals it monitors)
 
@@ -68,6 +78,20 @@ and Plasma theme).
 
 On shutdown (SIGINT / SIGTERM), the daemon exits gracefully.
 
+## How the generator works
+
+`theme-generator` reproduces the algorithm of `fcitx5-plasma-theme-generator`
+(upstream: fcitx/fcitx5-configtool, `src/plasmathemegenerator/main.cpp`,
+GPL-2.0-or-later):
+
+1. Resolve the active Plasma theme and its color scheme (the theme's `colors`
+   file, or the active KDE scheme from `kdeglobals` / `.colors` files).
+2. Load the theme's SVGs (`dialogs/background`, `widgets/viewitem`,
+   `widgets/arrows`, ...), inject the color scheme into the
+   `current-color-scheme` style block, and render the 9-slice frames to PNGs
+   (`panel.png`, `mask.png`, `highlight.png`, icons) with usvg/resvg.
+3. Write `theme.conf` in the fcitx5 classicui format.
+
 ## License
 
-See [LICENSE](./LICENSE)
+See LICENSES under each crates.

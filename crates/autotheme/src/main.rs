@@ -1,6 +1,5 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -205,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Regenerate theme and reload fcitx5 config, logging errors.
 async fn regenerate_and_reload(conn: &zbus::Connection) {
-    if let Err(e) = handle_theme_update().await {
+    if let Err(e) = handle_theme_update() {
         error!(%e, "theme update failed");
     }
     if let Err(e) = reload_fcitx5(conn).await {
@@ -219,30 +218,16 @@ fn theme_output_dir() -> anyhow::Result<PathBuf> {
     Ok(home.join(".var/app/org.fcitx.Fcitx5/data/fcitx5/themes/plasma"))
 }
 
-/// Run `fcitx5-plasma-theme-generator` to regenerate the fcitx5 theme
-/// from the current Plasma color scheme.
-async fn handle_theme_update() -> anyhow::Result<()> {
+/// Regenerate the fcitx5 theme from the current Plasma theme via the
+/// in-process generator.
+fn handle_theme_update() -> anyhow::Result<()> {
     let output_dir = theme_output_dir()?;
-
-    let output = tokio::process::Command::new("fcitx5-plasma-theme-generator")
-        .arg("-o")
-        .arg(&output_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .context("failed to run fcitx5-plasma-theme-generator")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "fcitx5-plasma-theme-generator exited with status {}: {}",
-            output.status,
-            stderr.trim()
-        );
-    }
-
-    info!("theme regenerated at {}", output_dir.display());
+    let generated = theme_generator::ThemeGenerator::new(&output_dir).generate()?;
+    info!(
+        "theme regenerated at {}: {}",
+        output_dir.display(),
+        generated.files.join(", ")
+    );
     Ok(())
 }
 

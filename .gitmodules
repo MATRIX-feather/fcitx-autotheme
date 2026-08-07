@@ -1,0 +1,3 @@
+[submodule "references/fcitx5-configtool"]
+	path = references/fcitx5-configtool
+	url = https://github.com/fcitx/fcitx5-configtool
