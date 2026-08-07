@@ -91,13 +91,22 @@ impl ColorGroup {
         }
     }
 
-    /// `KColorScheme` fallback chain when a key is missing in this set.
+    /// `KColorScheme` fallback order when a key is missing from a color set.
+    ///
+    /// Each role resolves from its own color set first — `KColorScheme` reads
+    /// `[Colors:Button]` for the Button set, `[Colors:View]` for the View
+    /// set, and so on — before falling back to the sets `KColorScheme` uses
+    /// to supply defaults.
     const fn fallback_chain(self) -> &'static [Self] {
         match self {
-            Self::Window | Self::View => &[Self::Window, Self::View, Self::Selection],
-            Self::Button | Self::Tooltip | Self::Complementary | Self::Header => {
-                &[Self::Window, Self::View, Self::Selection]
+            Self::Window => &[Self::Window, Self::View, Self::Selection],
+            Self::View => &[Self::View, Self::Window, Self::Selection],
+            Self::Button => &[Self::Button, Self::Window, Self::View, Self::Selection],
+            Self::Tooltip => &[Self::Tooltip, Self::Window, Self::View, Self::Selection],
+            Self::Complementary => {
+                &[Self::Complementary, Self::Window, Self::View, Self::Selection]
             }
+            Self::Header => &[Self::Header, Self::Window, Self::View, Self::Selection],
             Self::Selection => &[Self::Selection, Self::View, Self::Window],
         }
     }
@@ -406,23 +415,67 @@ impl ColorScheme {
     ///
     /// The desktop accent color drives the `Highlight` role (Selection
     /// `Background`, used by theme.conf and `.ColorScheme-Highlight`) and the
-    /// decoration roles (`.ColorScheme-*Focus`/`*Hover`). Decoration roles
-    /// resolve through the `KColorScheme` fallback chain starting at the
-    /// Window group — Breeze's viewitem hover/selected frames and checkmarks
-    /// radiobutton use `ColorScheme-ButtonFocus`, which falls back to Window
-    /// `DecorationFocus`. Injecting the accent into both groups makes the
-    /// generated PNGs and colors honor it, matching how KDE synthesizes an
-    /// accent at runtime.
+    /// decoration roles (`.ColorScheme-*Focus`/`*Hover`). KDE applies an
+    /// accent by writing it into the `DecorationFocus`/`DecorationHover` keys
+    /// of every color set (all `[Colors:*]` groups of kdeglobals), so we
+    /// mirror that: Breeze's viewitem hover/selected frames and checkmarks
+    /// radiobutton use `ColorScheme-ButtonFocus`, which must resolve to the
+    /// accent through the Button set itself, not through a Window fallback.
     #[must_use]
     pub fn with_accent_color(mut self, accent: Color) -> Self {
         self.groups
             .entry(ColorGroup::Selection)
             .or_default()
             .insert(ColorKey::Background, accent);
-        self.groups
-            .entry(ColorGroup::Window)
-            .or_default()
-            .insert(ColorKey::DecorationFocus, accent);
+        for group in [
+            ColorGroup::Window,
+            ColorGroup::View,
+            ColorGroup::Button,
+            ColorGroup::Tooltip,
+            ColorGroup::Complementary,
+            ColorGroup::Header,
+            ColorGroup::Selection,
+        ] {
+            let colors = self.groups.entry(group).or_default();
+            colors.insert(ColorKey::DecorationFocus, accent);
+            colors.insert(ColorKey::DecorationHover, accent);
+        }
+        self
+    }
+
+    /// Darken the highlight-driven roles by `percent` percent (0 = unchanged,
+    /// 10 = 10% darker).
+    ///
+    /// The decoration roles (`.ColorScheme-*Focus`/`*Hover`, which color
+    /// highlight.png and radio.png) and the `Highlight` role (theme.conf
+    /// `HighlightBackgroundColor`) are scaled toward black. Text, panel
+    /// backgrounds and other roles are left untouched so contrast is kept.
+    #[must_use]
+    pub fn with_highlight_darkening(mut self, percent: u8) -> Self {
+        if percent == 0 {
+            return self;
+        }
+        let scale = 100 - u16::from(percent);
+        let darken = |color: &mut Color| {
+            color.r = ((u16::from(color.r) * scale) / 100) as u8;
+            color.g = ((u16::from(color.g) * scale) / 100) as u8;
+            color.b = ((u16::from(color.b) * scale) / 100) as u8;
+        };
+        // The Highlight role: `[Colors:Selection] Background`.
+        if let Some(selection) = self.groups.get_mut(&ColorGroup::Selection)
+            && let Some(background) = selection.get_mut(&ColorKey::Background)
+        {
+            darken(background);
+        }
+        // Decoration roles in every color set.
+        for group in self.groups.values_mut() {
+            if let Some(focus) = group.get_mut(&ColorKey::DecorationFocus) {
+                darken(focus);
+            }
+            if let Some(hover) = group.get_mut(&ColorKey::DecorationHover) {
+                darken(hover);
+            }
+        }
         self
     }
 }
@@ -814,5 +867,77 @@ mod tests {
             Some("Breeze Dark".to_owned())
         );
         assert_eq!(general_color_scheme_name("[General]\nAccentColor=1,2,3\n"), None);
+    }
+
+    #[test]
+    fn button_focus_uses_button_group_first() {
+        // `KColorScheme` reads `[Colors:Button] DecorationFocus` for the
+        // Button set; the Window value must not win when the groups differ
+        // (regression: highlight.png/radio.png use `.ColorScheme-ButtonFocus`).
+        let text = "[Colors:Window]\nDecorationFocus=#ffffff\nDecorationHover=#eeeeee\n[Colors:View]\nDecorationFocus=#dddddd\nDecorationHover=#cccccc\n[Colors:Button]\nDecorationFocus=#101010\nDecorationHover=#202020\n";
+        let scheme = ColorScheme::parse(text, Path::new("test")).expect("parse");
+        assert_eq!(
+            scheme.named_color(StyleSheetColor::ButtonFocus),
+            Color::opaque(0x10, 0x10, 0x10)
+        );
+        assert_eq!(
+            scheme.named_color(StyleSheetColor::ButtonHover),
+            Color::opaque(0x20, 0x20, 0x20)
+        );
+        // View roles resolve from the View set, not Window.
+        assert_eq!(
+            scheme.named_color(StyleSheetColor::ViewFocus),
+            Color::opaque(0xdd, 0xdd, 0xdd)
+        );
+    }
+
+    #[test]
+    fn accent_reaches_all_decoration_groups() {
+        // KDE writes the accent into every color set's DecorationFocus/Hover;
+        // after that the Button set itself resolves ButtonFocus to the accent.
+        let text = "[Colors:Window]\nDecorationFocus=#556677\n[Colors:Button]\nDecorationFocus=#667788\n[Colors:View]\nDecorationFocus=#445566\n";
+        let accent = Color::opaque(0xe9, 0x3d, 0x58);
+        let scheme = ColorScheme::parse(text, Path::new("test"))
+            .expect("parse")
+            .with_accent_color(accent);
+        assert_eq!(scheme.named_color(StyleSheetColor::ButtonFocus), accent);
+        assert_eq!(scheme.named_color(StyleSheetColor::ButtonHover), accent);
+        assert_eq!(scheme.named_color(StyleSheetColor::ViewFocus), accent);
+        assert_eq!(scheme.named_color(StyleSheetColor::TooltipFocus), accent);
+        assert_eq!(scheme.named_color(StyleSheetColor::Highlight), accent);
+    }
+
+    #[test]
+    fn highlight_darkening_scopes_decoration_and_highlight() {
+        let text = "[Colors:Window]\nBackground=#ffffff\nDecorationFocus=#aaaaaa\nDecorationHover=#bbbbbb\n[Colors:Selection]\nBackground=#ff8800\nForeground=#ffffff\n";
+        let scheme = ColorScheme::parse(text, Path::new("test")).expect("parse");
+        let dark = scheme.clone().with_highlight_darkening(10);
+        // Decoration roles (ButtonFocus colors highlight.png/radio.png) are
+        // scaled toward black by 10%.
+        assert_eq!(
+            dark.named_color(StyleSheetColor::ButtonFocus),
+            Color::opaque(0x99, 0x99, 0x99)
+        );
+        assert_eq!(
+            dark.named_color(StyleSheetColor::ButtonHover),
+            Color::opaque(0xa8, 0xa8, 0xa8)
+        );
+        // The Highlight role (Selection Background) is darkened too.
+        assert_eq!(
+            dark.named_color(StyleSheetColor::Highlight),
+            Color::opaque(0xe5, 0x7a, 0x00)
+        );
+        // Everything else stays as-is: panel background, text and the
+        // highlighted text keep their original colors for contrast.
+        assert_eq!(
+            dark.named_color(StyleSheetColor::Background),
+            Color::opaque(0xff, 0xff, 0xff)
+        );
+        assert_eq!(
+            dark.named_color(StyleSheetColor::HighlightedText),
+            Color::opaque(0xff, 0xff, 0xff)
+        );
+        // Zero percent is a no-op.
+        assert_eq!(scheme.named_color(StyleSheetColor::ButtonFocus), scheme.with_highlight_darkening(0).named_color(StyleSheetColor::ButtonFocus));
     }
 }

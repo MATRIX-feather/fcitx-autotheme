@@ -21,6 +21,9 @@ struct Args {
     /// Debounce wait time in milliseconds before processing
     #[arg(short = 'w', long = "wait-time", default_value = "100", value_name = "MILLIS")]
     wait_time_ms: u64,
+    /// Darken highlight/accent colors by this many percent (0 = unchanged)
+    #[arg(long, default_value_t = 0, value_name = "PERCENT")]
+    darken_percent: u8,
 }
 
 /// Proxy trait for XDG Desktop Portal Settings interface.
@@ -230,8 +233,13 @@ async fn main() -> anyhow::Result<()> {
 
                 _ = sleep(wait_duration) => {
                     info!("debounce elapsed, regenerating fcitx5 theme");
-                    regenerate_and_reload(&conn, last_color_scheme.as_deref(), last_accent_color)
-                        .await;
+                    regenerate_and_reload(
+                        &conn,
+                        last_color_scheme.as_deref(),
+                        last_accent_color,
+                        args.darken_percent,
+                    )
+                    .await;
                     triggered = false;
                 }
 
@@ -333,8 +341,9 @@ async fn regenerate_and_reload(
     conn: &zbus::Connection,
     color_scheme: Option<&str>,
     accent_color: Option<Color>,
+    darken_percent: u8,
 ) {
-    if let Err(e) = handle_theme_update(color_scheme, accent_color) {
+    if let Err(e) = handle_theme_update(color_scheme, accent_color, darken_percent) {
         error!(%e, "theme update failed");
     }
     if let Err(e) = reload_fcitx5(conn).await {
@@ -353,9 +362,11 @@ fn theme_output_dir() -> anyhow::Result<PathBuf> {
 fn handle_theme_update(
     color_scheme: Option<&str>,
     accent_color: Option<Color>,
+    darken_percent: u8,
 ) -> anyhow::Result<()> {
     let output_dir = theme_output_dir()?;
-    let mut generator = theme_generator::ThemeGenerator::new(&output_dir);
+    let mut generator =
+        theme_generator::ThemeGenerator::new(&output_dir).with_highlight_darkening(darken_percent);
     if let Some(scheme) = color_scheme {
         generator = generator.with_color_scheme_name(scheme);
     }
