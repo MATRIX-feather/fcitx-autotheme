@@ -7,7 +7,7 @@ use clap::Parser;
 use futures_util::StreamExt;
 use tokio::signal;
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use zbus::proxy;
 
 /// CLI arguments.
@@ -45,6 +45,34 @@ trait PortalSettings {
         key: String,
         value: zbus::zvariant::OwnedValue,
     ) -> zbus::Result<()>;
+}
+
+/// Outcome of comparing an incoming `ColorScheme` value with the last seen one.
+enum ColorSchemeChange {
+    /// The value differs from the last seen one; a regeneration is needed.
+    Changed(String),
+    /// The value equals the last seen one; skip.
+    Unchanged,
+    /// The value could not be parsed as a string; cannot compare.
+    Unknown,
+}
+
+/// Compare an incoming `ColorScheme` setting value against the previously
+/// seen value, updating the cache when the value differs.
+fn classify_color_scheme(
+    value: &zbus::zvariant::OwnedValue,
+    last: &mut Option<String>,
+) -> ColorSchemeChange {
+    let Ok(scheme) = value.downcast_ref::<&str>() else {
+        return ColorSchemeChange::Unknown;
+    };
+    let scheme = scheme.to_owned();
+    if last.as_deref() == Some(scheme.as_str()) {
+        ColorSchemeChange::Unchanged
+    } else {
+        *last = Some(scheme.clone());
+        ColorSchemeChange::Changed(scheme)
+    }
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -94,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
             .context("failed to subscribe to ConfigChanged signal")?;
 
     let mut triggered = false;
+    let mut last_color_scheme: Option<String> = None;
 
     'outer: loop {
         if triggered {
@@ -120,7 +149,18 @@ async fn main() -> anyhow::Result<()> {
                                     if args.namespace == "org.kde.kdeglobals.General"
                                         && args.key == "ColorScheme" =>
                                 {
-                                    // Signal during debounce: restart timer by re-looping
+                                    match classify_color_scheme(&args.value, &mut last_color_scheme) {
+                                        ColorSchemeChange::Changed(scheme) => {
+                                            info!(%scheme, "color-scheme changed during debounce");
+                                            // Restart the debounce timer by re-looping.
+                                        }
+                                        ColorSchemeChange::Unchanged => {
+                                            info!("color-scheme unchanged, skipping");
+                                        }
+                                        ColorSchemeChange::Unknown => {
+                                            warn!("unable to parse color-scheme value");
+                                        }
+                                    }
                                 }
                                 Ok(_) => {} // unrelated signal
                                 Err(e) => error!(%e, "failed to parse signal args"),
@@ -166,8 +206,19 @@ async fn main() -> anyhow::Result<()> {
                                     if args.namespace == "org.kde.kdeglobals.General"
                                         && args.key == "ColorScheme" =>
                                 {
-                                    info!("color-scheme changed");
-                                    triggered = true;
+                                    match classify_color_scheme(&args.value, &mut last_color_scheme) {
+                                        ColorSchemeChange::Changed(scheme) => {
+                                            info!(%scheme, "color-scheme changed");
+                                            triggered = true;
+                                        }
+                                        ColorSchemeChange::Unchanged => {
+                                            info!("color-scheme unchanged, skipping");
+                                        }
+                                        ColorSchemeChange::Unknown => {
+                                            warn!("unable to parse color-scheme value, regenerating");
+                                            triggered = true;
+                                        }
+                                    }
                                 }
                                 Ok(_) => {}
                                 Err(e) => error!(%e, "failed to parse signal args"),
