@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/autotheme", "crates/theme-generator"]
+members = ["crates/autotheme", "crates/rust-fcitx-breeze-theme-generator"]
 
 [workspace.package]
 version = "0.1.0"

@@ -3,10 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use futures_util::StreamExt;
-use theme_generator::colors::Color;
-use theme_generator::OutputFormat;
 use tokio::signal;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -22,29 +20,19 @@ struct Args {
     /// Debounce wait time in milliseconds before processing
     #[arg(short = 'w', long = "wait-time", default_value = "100", value_name = "MILLIS")]
     wait_time_ms: u64,
-    /// Deepen (darken & saturate) highlight/accent colors by this many percent (0 = unchanged)
-    #[arg(long, default_value_t = 0, value_name = "PERCENT")]
-    deepen_percent: u8,
-    /// Output image format: rasterized PNGs (works everywhere) or vector SVGs
-    /// (crisp at any DPI; fcitx5 renders SVGs natively since mid-2026, older
-    /// releases rasterize them via gdk-pixbuf)
-    #[arg(long, value_enum, default_value_t = OutputFormatArg::Png, value_name = "FORMAT")]
-    format: OutputFormatArg,
 }
 
-/// Image format of the generated theme.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum OutputFormatArg {
-    Png,
-    Svg,
+/// An 8-bit RGB color, as parsed from the portal's `accent-color` signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Color {
+    r: u8,
+    g: u8,
+    b: u8,
 }
 
-impl From<OutputFormatArg> for OutputFormat {
-    fn from(value: OutputFormatArg) -> Self {
-        match value {
-            OutputFormatArg::Png => OutputFormat::Png,
-            OutputFormatArg::Svg => OutputFormat::Svg,
-        }
+impl Color {
+    const fn opaque(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
     }
 }
 
@@ -255,14 +243,7 @@ async fn main() -> anyhow::Result<()> {
 
                 _ = sleep(wait_duration) => {
                     info!("debounce elapsed, regenerating fcitx5 theme");
-                    regenerate_and_reload(
-                        &conn,
-                        last_color_scheme.as_deref(),
-                        last_accent_color,
-                        args.deepen_percent,
-                        args.format,
-                    )
-                    .await;
+                    regenerate_and_reload(&conn).await;
                     triggered = false;
                 }
 
@@ -360,14 +341,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Regenerate theme and reload fcitx5 config, logging errors.
-async fn regenerate_and_reload(
-    conn: &zbus::Connection,
-    color_scheme: Option<&str>,
-    accent_color: Option<Color>,
-    deepen_percent: u8,
-    format: OutputFormatArg,
-) {
-    if let Err(e) = handle_theme_update(color_scheme, accent_color, deepen_percent, format) {
+async fn regenerate_and_reload(conn: &zbus::Connection) {
+    if let Err(e) = handle_theme_update() {
         error!(%e, "theme update failed");
     }
     if let Err(e) = reload_fcitx5(conn).await {
@@ -382,24 +357,13 @@ fn theme_output_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// Regenerate the fcitx5 theme from the current Plasma theme via the
-/// in-process generator, honoring the cached color scheme and accent color.
-fn handle_theme_update(
-    color_scheme: Option<&str>,
-    accent_color: Option<Color>,
-    deepen_percent: u8,
-    format: OutputFormatArg,
-) -> anyhow::Result<()> {
+/// in-process generator.
+fn handle_theme_update() -> anyhow::Result<()> {
     let output_dir = theme_output_dir()?;
-    let mut generator = theme_generator::ThemeGenerator::new(&output_dir)
-        .with_highlight_deepening(deepen_percent)
-        .with_format(format.into());
-    if let Some(scheme) = color_scheme {
-        generator = generator.with_color_scheme_name(scheme);
-    }
-    if let Some(accent) = accent_color {
-        generator = generator.with_accent_color(accent);
-    }
-    let generated = generator.generate()?;
+    let theme = fcitx_breeze_theme_generator::Theme::new("default")
+        .map_err(|e| anyhow::anyhow!("failed to resolve Plasma theme: {e}"))?;
+    let generated = fcitx_breeze_theme_generator::generate_theme(&theme, &output_dir)
+        .map_err(|e| anyhow::anyhow!("failed to generate theme: {e}"))?;
     info!(
         "theme regenerated at {}: {}",
         output_dir.display(),

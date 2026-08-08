@@ -22,15 +22,15 @@ detects the change via D-Bus and:
 This replicates the behavior of the [original bash script](watch-theme-then-update-fcitx-theme),
 but in Rust with proper async I/O, graceful shutdown, and debounced signal handling.
 The theme generation itself is a Rust port of `fcitx5-plasma-theme-generator`
-(the fcitx5-configtool KCM utility): it resolves the active Plasma theme's
-color scheme, renders the theme's SVG frames to PNGs, and writes `theme.conf`.
+(the fcitx5-configtool KCM utility): it resolves the Plasma theme's color
+scheme, renders the theme's SVG frames to PNGs, and writes `theme.conf`.
 
 ## Workspace layout
 
 ```
 crates/
-├── autotheme/        # the D-Bus watcher daemon (binary: fcitx-autotheme)
-└── theme-generator/  # in-process Plasma → fcitx5 theme generator (library)
+├── autotheme/                          # the D-Bus watcher daemon (binary: fcitx-autotheme)
+└── rust-fcitx-breeze-theme-generator/  # in-process Plasma → fcitx5 theme generator (library + CLI)
 ```
 
 ## Build this project
@@ -51,23 +51,13 @@ fcitx-autotheme [OPTIONS]
 
 Options:
   -w, --wait-time <MILLIS>  Debounce wait time in milliseconds [default: 100]
-      --deepen-percent <PERCENT>  Deepen (darken & saturate) highlight/accent colors [default: 0]
-      --format <FORMAT>      Output image format: png or svg [default: png]
-  -h, --help                 Print help
+  -h, --help                Print help
 ```
 
 With a custom debounce (e.g., wait 500 ms before reacting):
 
 ```bash
 fcitx-autotheme --wait-time 500
-```
-
-To generate a vector SVG theme instead of rasterized PNGs (crisp at any DPI;
-fcitx5 renders SVGs natively since mid-2026 — older releases rasterize them
-via gdk-pixbuf, so smaller frames lose sharpness there):
-
-```bash
-fcitx-autotheme --format svg
 ```
 
 ## How it works
@@ -90,20 +80,18 @@ On shutdown (SIGINT / SIGTERM), the daemon exits gracefully.
 
 ## How the generator works
 
-`theme-generator` reproduces the algorithm of `fcitx5-plasma-theme-generator`
-(upstream: fcitx/fcitx5-configtool, `src/plasmathemegenerator/main.cpp`,
+`fcitx-breeze-theme-generator` (crates/rust-fcitx-breeze-theme-generator)
+reproduces the algorithm of `fcitx5-plasma-theme-generator` (upstream:
+fcitx/fcitx5-configtool, `src/plasmathemegenerator/main.cpp`,
 GPL-2.0-or-later):
 
-1. Resolve the active Plasma theme and its color scheme (the theme's `colors`
-   file, or the active KDE scheme from `kdeglobals` / `.colors` files).
+1. Load the Plasma theme (`default`) and resolve its color scheme — the
+   theme's `colors` file, falling back to the active KDE scheme from
+   `kdeglobals`, then to the Breeze Light defaults.
 2. Load the theme's SVGs (`dialogs/background`, `widgets/viewitem`,
    `widgets/arrows`, ...) and inject the color scheme into the
-   `current-color-scheme` style block. In PNG mode the 9-slice frames are
-   rendered to bitmaps (`panel.png`, `mask.png`, `highlight.png`, icons) with
-   usvg/resvg; in SVG mode (`--format svg`) the frames are instead composed
-   into vector documents (`panel.svg`, ...) with per-slice scale transforms,
-   sized so fcitx5 slices them at the same hint-derived `Margin` values as
-   the reference PNGs.
+   `current-color-scheme` style block. The 9-slice frames are rendered to
+   bitmaps (`panel.png`, `mask.png`, `highlight.png`, icons) with usvg/resvg.
 3. Write `theme.conf` in the fcitx5 classicui format.
 
 ## License

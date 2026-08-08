@@ -1,0 +1,28 @@
+[package]
+name = "fcitx-breeze-theme-generator"
+version = "0.1.0"
+edition = "2021"
+description = "Generate Fcitx 5 Classic UI theme based on Plasma theme (Rust reimplementation of fcitx5-plasma-theme-generator)"
+license = "GPL-2.0-or-later"
+readme = "README.md"
+keywords = ["fcitx", "plasma", "kde", "theme", "svg"]
+categories = ["command-line-utilities", "graphics"]
+
+[lib]
+name = "fcitx_breeze_theme_generator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcitx5-plasma-theme-generator"
+path = "src/main.rs"
+
+[dependencies]
+usvg = { version = "0.45", default-features = false, features = ["text"] }
+resvg = "0.45"
+tiny-skia = "0.11"
+png = "0.17"
+flate2 = "1"
+roxmltree = "0.20"
+xmlwriter = "0.1"
+fontdb = "0.23"
+libc = "0.2"

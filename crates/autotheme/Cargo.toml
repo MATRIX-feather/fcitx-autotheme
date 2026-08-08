@@ -14,7 +14,7 @@ anyhow.workspace = true
 clap.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
-theme-generator = { path = "../theme-generator" }
+fcitx-breeze-theme-generator = { path = "../rust-fcitx-breeze-theme-generator" }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

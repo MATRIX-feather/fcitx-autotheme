@@ -21,14 +21,14 @@
 使用原生异步 I/O、优雅的退出处理和信号防抖机制。
 
 主题生成本身是 `fcitx5-plasma-theme-generator`（fcitx5-configtool 的 KCM 工具）
-的 Rust 移植：解析当前 Plasma 主题的配色方案，将主题的 SVG 帧渲染成 PNG，并写出 `theme.conf`。
+的 Rust 移植：解析 Plasma 主题的配色方案，将主题的 SVG 帧渲染成 PNG，并写出 `theme.conf`。
 
 ## 工作区结构
 
 ```
 crates/
-├── autotheme/        # D-Bus 监听守护进程（二进制：fcitx-autotheme）
-└── theme-generator/  # 进程内 Plasma → fcitx5 主题生成器（库）
+├── autotheme/                          # D-Bus 监听守护进程（二进制：fcitx-autotheme）
+└── rust-fcitx-breeze-theme-generator/  # 进程内 Plasma → fcitx5 主题生成器（库 + CLI）
 ```
 
 ## 构建
@@ -75,10 +75,12 @@ fcitx-autotheme --wait-time 500
 
 ## 生成器工作原理
 
-`theme-generator` 复刻 `fcitx5-plasma-theme-generator` 的算法
+`fcitx-breeze-theme-generator`（crates/rust-fcitx-breeze-theme-generator）
+复刻 `fcitx5-plasma-theme-generator` 的算法
 （上游：fcitx/fcitx5-configtool，`src/plasmathemegenerator/main.cpp`，GPL-2.0-or-later）：
 
-1. 解析当前 Plasma 主题及其配色方案（主题的 `colors` 文件，或来自 `kdeglobals` / `.colors` 的活动配色）
+1. 加载 Plasma 主题（`default`）并解析其配色方案 —— 主题的 `colors` 文件，
+   回退到 `kdeglobals` 中的活动配色，再回退到 Breeze Light 默认值
 2. 加载主题的 SVG（`dialogs/background`、`widgets/viewitem`、`widgets/arrows` 等），
    将配色注入 `current-color-scheme` 样式块，用 usvg/resvg 把 9-slice 帧渲染成 PNG
    （`panel.png`、`mask.png`、`highlight.png`、图标）
