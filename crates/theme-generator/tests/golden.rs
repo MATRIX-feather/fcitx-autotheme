@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use image::GenericImageView;
+use theme_generator::OutputFormat;
 use theme_generator::ThemeGenerator;
 
 const FIXTURE_COLORS: &str = r#"[Colors:Window]
@@ -143,16 +144,21 @@ Image=line.png
 
 ";
 
-fn generate() -> tempfile::TempDir {
+fn generate_with(format: OutputFormat) -> tempfile::TempDir {
     let colors = tempfile::NamedTempFile::new().expect("colors fixture");
     std::fs::write(colors.path(), FIXTURE_COLORS).expect("write fixture");
     let out = tempfile::tempdir().expect("out dir");
     ThemeGenerator::new(out.path())
         .with_theme_name("default")
         .with_colors_file(colors.path())
+        .with_format(format)
         .generate()
         .expect("generate");
     out
+}
+
+fn generate() -> tempfile::TempDir {
+    generate_with(OutputFormat::Png)
 }
 
 fn read_png(path: &Path) -> image::RgbaImage {
@@ -311,4 +317,174 @@ fn accent_color_recolors_decoration_pngs() {
         radio.pixels().any(|p| p.0[3] > 0 && p.0[0] >= 150),
         "radio must contain accent-driven (red-dominant) pixels"
     );
+}
+
+/// Render an emitted SVG at its intrinsic size (unpremultiplied RGBA).
+fn render_svg(data: &[u8]) -> image::RgbaImage {
+    let tree = usvg::Tree::from_data(data, &usvg::Options::default()).expect("parse svg");
+    let w = tree.size().width().round().max(1.0) as u32;
+    let h = tree.size().height().round().max(1.0) as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::default(),
+        &mut pixmap.as_mut(),
+    );
+    let mut out = image::RgbaImage::new(w, h);
+    for (pixel, chunk) in out.pixels_mut().zip(pixmap.data().chunks_exact(4)) {
+        let [r, g, b, a] = chunk.try_into().unwrap_or([0, 0, 0, 0]);
+        let (r, g, b) = if a == 0 {
+            (0, 0, 0)
+        } else {
+            let a16 = u32::from(a);
+            (
+                (u32::from(r) * 255 / a16) as u8,
+                (u32::from(g) * 255 / a16) as u8,
+                (u32::from(b) * 255 / a16) as u8,
+            )
+        };
+        *pixel = image::Rgba([r, g, b, a]);
+    }
+    out
+}
+
+#[test]
+fn svg_theme_conf_differs_only_in_image_extensions() {
+    let png =
+        std::fs::read_to_string(generate().path().join("theme.conf")).expect("read png conf");
+    let svg = std::fs::read_to_string(generate_with(OutputFormat::Svg).path().join("theme.conf"))
+        .expect("read svg conf");
+    assert_eq!(
+        svg.replace(".svg", ".png"),
+        png,
+        "SVG theme.conf must differ from PNG only in image extensions"
+    );
+}
+
+#[test]
+fn svg_files_are_valid_documents_with_namespace() {
+    // Regression: emitted SVGs must declare the SVG namespace and a valid
+    // `version`, or strict renderers (browsers, VS Code, librsvg) treat them
+    // as broken and render nothing.
+    let out = generate_with(OutputFormat::Svg);
+    let names = [
+        "panel.svg",
+        "mask.svg",
+        "highlight.svg",
+        "prev.svg",
+        "next.svg",
+        "arrow.svg",
+        "radio.svg",
+        "line.svg",
+    ];
+    for name in names {
+        let text = std::fs::read_to_string(out.path().join(name)).expect(name);
+        assert!(
+            text.contains("xmlns=\"http://www.w3.org/2000/svg\""),
+            "{name} missing the SVG namespace"
+        );
+        assert!(
+            !text.contains("version=\"1.4.2"),
+            "{name} leaks an Inkscape version string into the svg version attribute"
+        );
+        // Strict parsers must accept the document.
+        usvg::Tree::from_data(text.as_bytes(), &usvg::Options::default())
+            .unwrap_or_else(|e| panic!("{name} does not parse: {e}"));
+    }
+}
+
+#[test]
+fn svg_panel_renders_clean_and_matches_frame_colors() {
+    let out = generate_with(OutputFormat::Svg);
+    let data = std::fs::read(out.path().join("panel.svg")).expect("panel.svg");
+    let panel = render_svg(&data);
+    assert!(
+        panel.width() >= 100 && panel.height() >= 100,
+        "panel too small: {}x{}",
+        panel.width(),
+        panel.height()
+    );
+    // The frame center carries the Window Background color at ~0.85 alpha.
+    let (w, h) = (panel.width(), panel.height());
+    let center = panel.get_pixel(w / 2, h / 2).0;
+    assert!(
+        center[0].abs_diff(0x11) <= 3
+            && center[1].abs_diff(0x22) <= 3
+            && center[2].abs_diff(0x33) <= 3,
+        "center {center:?}"
+    );
+    assert!(center[3] > 200, "center alpha {}", center[3]);
+    // A corner is transparent (the shadow's rounded outer corner).
+    assert_eq!(panel.get_pixel(2, 2).0, [0, 0, 0, 0]);
+    // Hint debug colors must never leak into the emitted SVG.
+    assert_no_hint_colors(&panel, "panel.svg");
+}
+
+#[test]
+fn svg_mask_renders_opaque_shape_without_hints() {
+    let out = generate_with(OutputFormat::Svg);
+    let data = std::fs::read(out.path().join("mask.svg")).expect("mask.svg");
+    let mask = render_svg(&data);
+    let opaque = mask.pixels().filter(|p| p.0[3] > 0).count();
+    assert!(
+        opaque * 2 > (mask.width() * mask.height()) as usize,
+        "mask too small: {opaque} of {}x{}",
+        mask.width(),
+        mask.height()
+    );
+    assert_no_hint_colors(&mask, "mask.svg");
+}
+
+#[test]
+fn svg_highlight_renders_with_hover_content() {
+    let out = generate_with(OutputFormat::Svg);
+    let data = std::fs::read(out.path().join("highlight.svg")).expect("highlight.svg");
+    let highlight = render_svg(&data);
+    let opaque = highlight.pixels().filter(|p| p.0[3] > 0).count();
+    assert!(
+        opaque * 2 > (highlight.width() * highlight.height()) as usize,
+        "highlight mostly empty: {opaque} of {}x{}",
+        highlight.width(),
+        highlight.height()
+    );
+    assert_no_hint_colors(&highlight, "highlight.svg");
+}
+
+#[test]
+fn svg_icons_have_reference_sizes() {
+    let out = generate_with(OutputFormat::Svg);
+    for (name, w, h) in [
+        ("prev.svg", 22, 22),
+        ("next.svg", 22, 22),
+        ("arrow.svg", 16, 16),
+        ("radio.svg", 16, 16),
+    ] {
+        let tree = usvg::Tree::from_data(
+            &std::fs::read(out.path().join(name)).expect(name),
+            &usvg::Options::default(),
+        )
+        .expect("parse icon");
+        assert_eq!(
+            (
+                tree.size().width().round() as u32,
+                tree.size().height().round() as u32
+            ),
+            (w, h),
+            "{name} size"
+        );
+    }
+    // The separator keeps its natural size.
+    let line_tree = usvg::Tree::from_data(
+        &std::fs::read(out.path().join("line.svg")).expect("line.svg"),
+        &usvg::Options::default(),
+    )
+    .expect("parse line");
+    assert_eq!(line_tree.size().width().round() as u32, 3, "line width");
+    // Arrows are drawn with the `.ColorScheme-Text` class = Window Foreground.
+    let prev = render_svg(&std::fs::read(out.path().join("prev.svg")).expect("prev.svg"));
+    let has_arrow_color = prev.pixels().any(|p| {
+        let [r, g, b, a] = p.0;
+        a > 0 && (r, g, b) == (0xaa, 0xbb, 0xcc)
+    });
+    assert!(has_arrow_color, "prev.svg must use the window foreground color");
 }

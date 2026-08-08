@@ -5,6 +5,10 @@
 //! GPL-2.0-or-later). It reproduces the same algorithm: resolve the active
 //! Plasma theme's color scheme, render the theme's SVG frames to PNGs, and
 //! write a `theme.conf` in fcitx5 classicui format.
+//!
+//! Images can also be emitted as SVGs ([`OutputFormat::Svg`]): the theme's
+//! frames are filtered and normalized into vector documents that fcitx5
+//! renders itself, so panels scale to any size without rasterization loss.
 
 #![deny(missing_docs)]
 // The pipeline works with 8-bit RGBA channels and f32 geometry; the pedantic
@@ -122,6 +126,18 @@ const ICON_SIZE_SMALL_MEDIUM: u32 = 22;
 /// Icon size `KIconLoader::SizeSmall`.
 const ICON_SIZE_SMALL: u32 = 16;
 
+/// Output image format for the generated theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    /// Rasterized PNGs (the classic behavior; works on every fcitx5 version).
+    #[default]
+    Png,
+    /// Vector SVGs. fcitx5 renders them natively since mid-2026 (master);
+    /// older releases rasterize them via gdk-pixbuf at the SVG's intrinsic
+    /// size, so smaller frames lose sharpness there.
+    Svg,
+}
+
 /// A theme generation run result.
 #[derive(Debug)]
 pub struct GeneratedTheme {
@@ -150,6 +166,8 @@ pub struct ThemeGenerator {
     /// many percent (0 = unchanged): darkened and saturated by the same
     /// percentage.
     highlight_deepen_percent: u8,
+    /// Image format of the generated theme.
+    format: OutputFormat,
 }
 
 impl ThemeGenerator {
@@ -164,6 +182,7 @@ impl ThemeGenerator {
             color_scheme_name: None,
             accent_color: None,
             highlight_deepen_percent: 10,
+            format: OutputFormat::Png,
         }
     }
 
@@ -217,6 +236,13 @@ impl ThemeGenerator {
         self
     }
 
+    /// Set the output image format (default [`OutputFormat::Png`]).
+    #[must_use]
+    pub const fn with_format(mut self, format: OutputFormat) -> Self {
+        self.format = format;
+        self
+    }
+
     /// Generate the theme into the output directory.
     pub fn generate(&self) -> Result<GeneratedTheme> {
         let theme = theme_resolver::resolve_theme(self.theme_name.as_deref())?;
@@ -260,9 +286,18 @@ impl ThemeGenerator {
         self.init_config(&mut config, &theme, &theme_colors);
 
         let mut files: Vec<String> = Vec::new();
-        self.generate_panel(&theme, &css, &mut config, &mut files)?;
-        self.generate_highlight(&theme, &css, &mut config, &mut files)?;
-        self.generate_icons(&theme, &css, &mut config, &mut files)?;
+        match self.format {
+            OutputFormat::Png => {
+                self.generate_panel(&theme, &css, &mut config, &mut files)?;
+                self.generate_highlight(&theme, &css, &mut config, &mut files)?;
+                self.generate_icons(&theme, &css, &mut config, &mut files)?;
+            }
+            OutputFormat::Svg => {
+                self.generate_panel_svg(&theme, &css, &mut config, &mut files)?;
+                self.generate_highlight_svg(&theme, &css, &mut config, &mut files)?;
+                self.generate_icons_svg(&theme, &css, &mut config, &mut files)?;
+            }
+        }
 
         let path = self.output_dir.join("theme.conf");
         let text = config.serialize();
@@ -445,6 +480,169 @@ impl ThemeGenerator {
         Ok(())
     }
 
+    /// SVG-mode panel: emit `panel.svg` (base frame composed at the shadow
+    /// offset, shadow frame over it) and optional `mask.svg`, plus the
+    /// theme.conf entries.
+    ///
+    /// Frames are composed into a 200×200 vector canvas with per-slice scale
+    /// transforms (see [`svg::PlasmaSvg::emit_composed`]), so the `Margin`
+    /// values computed from the hint elements — identical to the PNG path —
+    /// are expressed in the SVG's own coordinate units and fcitx5 slices the
+    /// document exactly like it slices the reference PNGs.
+    fn generate_panel_svg(
+        &self,
+        theme: &Theme,
+        css: &str,
+        config: &mut theme_conf::Config,
+        files: &mut Vec<String>,
+    ) -> Result<()> {
+        let mut background = PlasmaSvg::load(theme, "dialogs/background", css)?;
+
+        let has_shadow = background.has_element_prefix("shadow");
+        let shadow_margins = if has_shadow {
+            background.frame("shadow", FRAME_SIZE, FRAME_SIZE)?.margins()
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
+        let (shadow_left, shadow_top, shadow_right, shadow_bottom) = shadow_margins;
+        let bg_margins = background.frame("", FRAME_SIZE, FRAME_SIZE)?.margins();
+        let (bg_left, bg_top, bg_right, bg_bottom) = bg_margins;
+        // Same numbers as the PNG path: content margins measure from the
+        // panel's outer edge (bg hint margin + shadow offset).
+        let content_margins = (
+            bg_left + shadow_left,
+            bg_top + shadow_top,
+            bg_right + shadow_right,
+            bg_bottom + shadow_bottom,
+        );
+
+        // The bg frame is composed at the panel size minus the shadow, placed
+        // at the shadow offset; the shadow frame covers the full panel.
+        let bg_size = (
+            FRAME_SIZE - (shadow_left + shadow_right) as u32,
+            FRAME_SIZE - (shadow_top + shadow_bottom) as u32,
+        );
+        let mut frames: Vec<svg::ComposedFrame<'_>> = Vec::new();
+        frames.push(("", bg_size, (shadow_left, shadow_top)));
+        if has_shadow {
+            frames.push(("shadow", (FRAME_SIZE, FRAME_SIZE), (0.0, 0.0)));
+        }
+        let svg_bytes = background.emit_composed(&frames, (FRAME_SIZE, FRAME_SIZE))?;
+        write_svg(&self.output_dir, "panel.svg", &svg_bytes, files)?;
+
+        set_margins(config, "InputPanel", "ContentMargin", content_margins);
+        set_margins(config, "Menu", "ContentMargin", content_margins);
+        set_margins(config, "InputPanel", "ShadowMargin", shadow_margins);
+        config.set("InputPanel/Background/Image", "panel.svg");
+        config.set("Menu/Background/Image", "panel.svg");
+        set_margins(config, "InputPanel/Background", "Margin", content_margins);
+        set_margins(config, "Menu/Background", "Margin", content_margins);
+
+        if theme.blur_behind {
+            if !background.has_element_prefix("mask") {
+                return Err(Error::missing_element(
+                    background.path().to_path_buf(),
+                    "mask",
+                ));
+            }
+            // The mask frame is composed like the PNG mask (shrunk by the
+            // shadow and an extra 2, placed 1 px inside the shadow edge);
+            // fcitx5 slices it with the background's Margin.
+            let mask_size = (
+                FRAME_SIZE - (shadow_left * 2.0).round() as u32 - 2,
+                FRAME_SIZE - (shadow_top * 2.0).round() as u32 - 2,
+            );
+            let mask_frames = [("mask", mask_size, (shadow_left + 1.0, shadow_top + 1.0))];
+            let mask_bytes = background.emit_composed(&mask_frames, (FRAME_SIZE, FRAME_SIZE))?;
+            write_svg(&self.output_dir, "mask.svg", &mask_bytes, files)?;
+            config.set("InputPanel/BlurMask", "mask.svg");
+            config.set("InputPanel/EnableBlur", "True");
+        }
+        Ok(())
+    }
+
+    /// SVG-mode highlight: `widgets/viewitem` hover/selected prefix composed
+    /// into `highlight.svg`, with the same hint-derived margin numbers as
+    /// the PNG path.
+    fn generate_highlight_svg(
+        &self,
+        theme: &Theme,
+        css: &str,
+        config: &mut theme_conf::Config,
+        files: &mut Vec<String>,
+    ) -> Result<()> {
+        let mut viewitem = PlasmaSvg::load(theme, "widgets/viewitem", css)?;
+        let prefix = if viewitem.has_element_prefix("hover") {
+            "hover"
+        } else if viewitem.has_element_prefix("selected") {
+            "selected"
+        } else {
+            return Ok(());
+        };
+        let frames = [(prefix, (FRAME_SIZE, FRAME_SIZE), (0.0, 0.0))];
+        let svg_bytes = viewitem.emit_composed(&frames, (FRAME_SIZE, FRAME_SIZE))?;
+        write_svg(&self.output_dir, "highlight.svg", &svg_bytes, files)?;
+
+        let (l, t, r, b) = viewitem.frame(prefix, FRAME_SIZE, FRAME_SIZE)?.margins();
+        // Mirror main.cpp: margins floored at the text margin.
+        let text_margin = self.text_margin();
+        let (l, t, r, b) = (
+            l.max(text_margin),
+            t.max(text_margin),
+            r.max(text_margin),
+            b.max(text_margin),
+        );
+        config.set("InputPanel/Highlight/Image", "highlight.svg");
+        config.set("Menu/Highlight/Image", "highlight.svg");
+        set_margins(config, "InputPanel/Highlight", "Margin", (l, t, r, b));
+        set_margins(config, "Menu/Highlight", "Margin", (l, t, r, b));
+        set_margins(config, "InputPanel", "TextMargin", (l, t + text_margin, r, b + text_margin));
+        set_margins(config, "Menu", "TextMargin", (l, t, r, b));
+        Ok(())
+    }
+
+    /// SVG-mode icons: arrows and radio emitted as standalone SVGs sized at
+    /// their on-screen size (fcitx5 renders action images at the SVG's
+    /// intrinsic size, 1:1); the separator keeps its full native document.
+    fn generate_icons_svg(
+        &self,
+        theme: &Theme,
+        css: &str,
+        config: &mut theme_conf::Config,
+        files: &mut Vec<String>,
+    ) -> Result<()> {
+        let arrows = PlasmaSvg::load(theme, "widgets/arrows", css)?;
+        if arrows.has_element("left-arrow") && arrows.has_element("right-arrow") {
+            let prev = arrows.emit_element("left-arrow", ICON_SIZE_SMALL_MEDIUM, ICON_SIZE_SMALL_MEDIUM)?;
+            write_svg(&self.output_dir, "prev.svg", &prev, files)?;
+            let next = arrows.emit_element("right-arrow", ICON_SIZE_SMALL_MEDIUM, ICON_SIZE_SMALL_MEDIUM)?;
+            write_svg(&self.output_dir, "next.svg", &next, files)?;
+            config.set("InputPanel/PrevPage/Image", "prev.svg");
+            config.set("InputPanel/NextPage/Image", "next.svg");
+        }
+        if arrows.has_element("right-arrow") {
+            let arrow = arrows.emit_element("right-arrow", ICON_SIZE_SMALL, ICON_SIZE_SMALL)?;
+            write_svg(&self.output_dir, "arrow.svg", &arrow, files)?;
+            config.set("Menu/SubMenu/Image", "arrow.svg");
+        }
+
+        let checkmarks = PlasmaSvg::load(theme, "widgets/checkmarks", css)?;
+        if checkmarks.has_element("radiobutton") {
+            let radio = checkmarks.emit_element("radiobutton", ICON_SIZE_SMALL, ICON_SIZE_SMALL)?;
+            write_svg(&self.output_dir, "radio.svg", &radio, files)?;
+            config.set("Menu/CheckBox/Image", "radio.svg");
+        }
+
+        let line = PlasmaSvg::load(theme, "widgets/line", css)?;
+        if line.has_element("horizontal-line") {
+            // The separator keeps the whole (already color-injected) native
+            // document so its dashed pattern matches the reference PNG.
+            write_svg(&self.output_dir, "line.svg", line.document(), files)?;
+            config.set("Menu/Separator/Image", "line.svg");
+        }
+        Ok(())
+    }
+
     /// `textMargin` = `smallSpacing / 2` with `smallSpacing = max(2, grid/4)`.
     #[must_use]
     fn text_margin(&self) -> f32 {
@@ -546,8 +744,15 @@ fn write_png(
 ) -> Result<()> {
     let path = dir.join(name);
     image.save(&path).map_err(|e| {
-        Error::other(format!("failed to save {}: {e}", path.display()))
+        Error::other(format!("failed to save {name}: {e}", name = path.display()))
     })?;
+    files.push(name.to_owned());
+    Ok(())
+}
+
+fn write_svg(dir: &Path, name: &str, data: &[u8], files: &mut Vec<String>) -> Result<()> {
+    let path = dir.join(name);
+    std::fs::write(&path, data).map_err(|source| Error::io(path.clone(), source))?;
     files.push(name.to_owned());
     Ok(())
 }

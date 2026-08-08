@@ -61,6 +61,12 @@ impl PlasmaSvg {
         &self.path
     }
 
+    /// The full style-replaced document bytes, at its native size.
+    #[must_use]
+    pub fn document(&self) -> &[u8] {
+        &self.xml
+    }
+
     /// Whether any element id equals `prefix` or starts with `prefix-`.
     pub fn has_element_prefix(&self, prefix: &str) -> bool {
         element_exists_prefix(self.full.root(), prefix)
@@ -122,7 +128,200 @@ impl PlasmaSvg {
         let h = size.height().round().max(1.0) as u32;
         render_element_at_scale(self, &bbox, 1.0, w, h)
     }
+
+    /// Emit a filtered, normalized SVG document.
+    ///
+    /// Only elements whose id matches `keep` survive (plus `defs`, the
+    /// `current-color-scheme` style block and ancestor groups). The root
+    /// `<svg>` gets explicit `width`/`height` set to `size` and a `viewBox`
+    /// of `view_box`, so content maps onto the output at a known size. The
+    /// style block content is already color-injected in `self.xml` and is
+    /// preserved verbatim.
+    pub fn emit(
+        &self,
+        keep: &dyn Fn(&str) -> bool,
+        view_box: [f32; 4],
+        size: (u32, u32),
+    ) -> Result<Vec<u8>> {
+        let text = std::str::from_utf8(&self.xml)
+            .map_err(|e| Error::other(format!("invalid UTF-8 in SVG: {e}")))?;
+        let doc = Document::parse(text)
+            .map_err(|e| Error::other(format!("failed to parse SVG: {e}")))?;
+        let root = doc.root_element();
+        let mut writer = XmlWriter::new(Options {
+            use_single_quote: false,
+            ..Options::default()
+        });
+        writer.start_element("svg");
+        write_xmlns(&mut writer, root);
+        for attr in root.attributes() {
+            if matches!(attr.name(), "width" | "height" | "viewBox") {
+                continue;
+            }
+            write_attr(&mut writer, &attr);
+        }
+        writer.write_attribute("width", &size.0.to_string());
+        writer.write_attribute("height", &size.1.to_string());
+        let (x, y, w, h) = (view_box[0], view_box[1], view_box[2], view_box[3]);
+        writer.write_attribute("viewBox", &format!("{x} {y} {w} {h}"));
+        for child in root.children() {
+            write_filtered_with(&mut writer, child, keep, "");
+        }
+        writer.end_element();
+        Ok(writer.end_document().into_bytes())
+    }
+
+    /// Emit a single element (plus its defs and the color style block) as a
+    /// standalone SVG rendered at `width` × `height`, with the element's
+    /// bounding box as the viewBox. Action images (arrows, radio) render at
+    /// this intrinsic size in fcitx5, so the size is the on-screen size.
+    pub fn emit_element(&self, id: &str, width: u32, height: u32) -> Result<Vec<u8>> {
+        let bbox = self
+            .element_bbox(id)
+            .ok_or_else(|| Error::missing_element(self.path.clone(), id))?;
+        let keep = |candidate: &str| candidate == id;
+        self.emit(&keep, bbox, (width, height))
+    }
+
+    /// Compose one or more 9-slice frames into a canonical-size SVG document,
+    /// mirroring the raster composition in `frame.rs`: each slice's content
+    /// is wrapped in a group whose transform maps the slice's absolute
+    /// bounding box onto its region of the target canvas (corners at native
+    /// size, edges scaled on one axis, center on both). Frames are painted
+    /// in list order (later frames on top), each placed at its offset.
+    ///
+    /// `defs` and the injected color style block are preserved once. fcitx5
+    /// later slices this document at the hint-derived `Margin`, reproducing
+    /// the reference raster layout at any panel size.
+    pub fn emit_composed(
+        &self,
+        frames: &[ComposedFrame<'_>],
+        canvas: (u32, u32),
+    ) -> Result<Vec<u8>> {
+        let (cw, ch) = (canvas.0 as f32, canvas.1 as f32);
+        let text = std::str::from_utf8(&self.xml)
+            .map_err(|e| Error::other(format!("invalid UTF-8 in SVG: {e}")))?;
+        let doc = Document::parse(text)
+            .map_err(|e| Error::other(format!("failed to parse SVG: {e}")))?;
+        let root = doc.root_element();
+        let mut writer = XmlWriter::new(Options {
+            use_single_quote: false,
+            ..Options::default()
+        });
+        writer.start_element("svg");
+        write_xmlns(&mut writer, root);
+        for attr in root.attributes() {
+            if matches!(attr.name(), "width" | "height" | "viewBox") {
+                continue;
+            }
+            write_attr(&mut writer, &attr);
+        }
+        writer.write_attribute("width", &canvas.0.to_string());
+        writer.write_attribute("height", &canvas.1.to_string());
+        writer.write_attribute("viewBox", &format!("0 0 {cw} {ch}"));
+
+        // defs are emitted wholesale (they already carry the color style
+        // block when the theme puts it there); a style block outside any
+        // defs is emitted separately, never duplicated.
+        let defs: Vec<Node<'_, '_>> = root
+            .descendants()
+            .filter(|node| node.tag_name().name() == "defs")
+            .collect();
+        for node in &defs {
+            write_node(&mut writer, *node, "");
+        }
+        for node in root.descendants() {
+            if node.tag_name().name() == "style"
+                && node.attribute("id") == Some("current-color-scheme")
+                && !node.ancestors().any(|ancestor| ancestor.tag_name().name() == "defs")
+            {
+                write_node(&mut writer, node, "");
+            }
+        }
+
+        for &(prefix, (fw, fh), (ox, oy)) in frames {
+            let (sl, st, sr, sb) = self.frame_grid(prefix)?;
+            let content_w = (fw as f32 - sl - sr).max(1.0);
+            let content_h = (fh as f32 - st - sb).max(1.0);
+            writer.start_element("g");
+            if ox != 0.0 || oy != 0.0 {
+                writer.write_attribute("transform", &format!("translate({ox} {oy})"));
+            }
+            let slice = |writer: &mut XmlWriter,
+                         name: &str,
+                         dx: f32,
+                         dy: f32,
+                         dw: f32,
+                         dh: f32| -> Result<()> {
+                let id = if prefix.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{prefix}-{name}")
+                };
+                let bbox = self
+                    .element_bbox(&id)
+                    .ok_or_else(|| Error::missing_element(self.path.clone(), &id))?;
+                let node = find_node_by_id(&root, &id)
+                    .ok_or_else(|| Error::missing_element(self.path.clone(), &id))?;
+                let sx = dw / bbox[2].max(1.0);
+                let sy = dh / bbox[3].max(1.0);
+                writer.start_element("g");
+                writer.write_attribute(
+                    "transform",
+                    &format!(
+                        "translate({} {}) scale({sx} {sy})",
+                        dx - bbox[0] * sx,
+                        dy - bbox[1] * sy
+                    ),
+                );
+                write_node_path(writer, root, node);
+                writer.end_element();
+                Ok(())
+            };
+            slice(&mut writer, "top", sl, 0.0, content_w, st)?;
+            slice(&mut writer, "bottom", sl, fh as f32 - sb, content_w, sb)?;
+            slice(&mut writer, "left", 0.0, st, sl, content_h)?;
+            slice(&mut writer, "right", fw as f32 - sr, st, sr, content_h)?;
+            slice(&mut writer, "center", sl, st, content_w, content_h)?;
+            slice(&mut writer, "topleft", 0.0, 0.0, sl, st)?;
+            slice(&mut writer, "topright", fw as f32 - sr, 0.0, sr, st)?;
+            slice(&mut writer, "bottomleft", 0.0, fh as f32 - sb, sl, sb)?;
+            slice(&mut writer, "bottomright", fw as f32 - sr, fh as f32 - sb, sr, sb)?;
+            writer.end_element();
+        }
+        writer.end_element();
+        Ok(writer.end_document().into_bytes())
+    }
+
+    /// The frame border thicknesses (left, top, right, bottom) from the
+    /// slice elements' sizes, in document units.
+    fn frame_grid(&self, prefix: &str) -> Result<(f32, f32, f32, f32)> {
+        let full = |name: &str| -> String {
+            if prefix.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{prefix}-{name}")
+            }
+        };
+        let width = |name: &str| -> Result<f32> {
+            let bbox = self
+                .element_bbox(&full(name))
+                .ok_or_else(|| Error::missing_element(self.path.clone(), &full(name)))?;
+            Ok(bbox[2])
+        };
+        let height = |name: &str| -> Result<f32> {
+            let bbox = self
+                .element_bbox(&full(name))
+                .ok_or_else(|| Error::missing_element(self.path.clone(), &full(name)))?;
+            Ok(bbox[3])
+        };
+        Ok((width("left")?, height("top")?, width("right")?, height("bottom")?))
+    }
 }
+
+/// A frame to compose: element prefix, target size, and offset within the
+/// canvas.
+pub type ComposedFrame<'a> = (&'a str, (u32, u32), (f32, f32));
 
 /// Render an element: scale the whole document uniformly, then crop the
 /// element's region, then center it on a `target_w`×`target_h` canvas.
@@ -214,6 +413,33 @@ fn read_asset(path: &Path) -> Result<Vec<u8>> {
     }
 }
 
+/// Write the namespace declarations for an emitted SVG: the default SVG
+/// namespace (required for a valid, renderable document) plus `xmlns:xlink`
+/// when the document uses `xlink:href` references. Editor namespaces
+/// (inkscape, sodipodi, ...) are intentionally dropped together with their
+/// attributes.
+fn write_xmlns(writer: &mut XmlWriter, root: Node<'_, '_>) {
+    writer.write_attribute("xmlns", "http://www.w3.org/2000/svg");
+    if root.namespaces().any(|ns| ns.name() == Some("xlink")) {
+        writer.write_attribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+    }
+}
+
+/// Write an attribute with a properly qualified name. Attributes from
+/// foreign namespaces (editor junk like `inkscape:*` / `sodipodi:*`) are
+/// dropped; `xlink:` and `xml:` prefixes are preserved. Returns whether the
+/// attribute was written.
+fn write_attr(writer: &mut XmlWriter, attr: &roxmltree::Attribute<'_, '_>) -> bool {
+    let name = match attr.namespace() {
+        None => attr.name().to_owned(),
+        Some("http://www.w3.org/1999/xlink") => format!("xlink:{}", attr.name()),
+        Some("http://www.w3.org/XML/1998/namespace") => format!("xml:{}", attr.name()),
+        Some(_) => return false,
+    };
+    writer.write_attribute(&name, attr.value());
+    true
+}
+
 /// Replace the `current-color-scheme` style block content with `stylesheet`.
 fn replace_style_block(raw: &[u8], stylesheet: &str, name: &str) -> Result<Vec<u8>> {
     let doc = Document::parse(std::str::from_utf8(raw).map_err(|e| Error::other(format!("invalid UTF-8 in {name}: {e}")))?)
@@ -224,13 +450,9 @@ fn replace_style_block(raw: &[u8], stylesheet: &str, name: &str) -> Result<Vec<u
         ..Options::default()
     });
     writer.start_element("svg");
-    let mut seen = Vec::new();
+    write_xmlns(&mut writer, root);
     for attr in root.attributes() {
-        if seen.contains(&attr.name()) {
-            continue;
-        }
-        seen.push(attr.name());
-        writer.write_attribute(attr.name(), attr.value());
+        write_attr(&mut writer, &attr);
     }
     for child in root.children() {
         write_node(&mut writer, child, stylesheet);
@@ -255,13 +477,9 @@ fn filter_frame(xml: &[u8], prefix: &str) -> Result<Vec<u8>> {
         ..Options::default()
     });
     writer.start_element("svg");
-    let mut seen = Vec::new();
+    write_xmlns(&mut writer, root);
     for attr in root.attributes() {
-        if seen.contains(&attr.name()) {
-            continue;
-        }
-        seen.push(attr.name());
-        writer.write_attribute(attr.name(), attr.value());
+        write_attr(&mut writer, &attr);
     }
     for child in root.children() {
         write_filtered(&mut writer, child, prefix, "");
@@ -271,7 +489,7 @@ fn filter_frame(xml: &[u8], prefix: &str) -> Result<Vec<u8>> {
 }
 
 /// Decide whether a node survives frame filtering.
-fn keep_node(node: Node<'_, '_>, prefix: &str) -> bool {
+fn keep_node_with(node: Node<'_, '_>, keep: &dyn Fn(&str) -> bool) -> bool {
     if node.is_comment() || node.is_text() {
         return false;
     }
@@ -282,12 +500,12 @@ fn keep_node(node: Node<'_, '_>, prefix: &str) -> bool {
         return true;
     }
     if let Some(id) = node.attribute("id")
-        && matches_prefix(id, prefix)
+        && keep(id)
     {
         return true;
     }
     // Keep ancestors of kept elements.
-    node.children().any(|child| keep_node(child, prefix))
+    node.children().any(|child| keep_node_with(child, keep))
 }
 
 /// Serialize a node if it survives filtering, recursing with the same
@@ -295,18 +513,30 @@ fn keep_node(node: Node<'_, '_>, prefix: &str) -> bool {
 /// content (gradients, masks, clips) is written wholesale: frame filtering
 /// must never strip the defs a slice element references.
 fn write_filtered(writer: &mut XmlWriter, node: Node<'_, '_>, prefix: &str, stylesheet: &str) {
-    if !keep_node(node, prefix) {
+    write_filtered_with(writer, node, &|id| matches_prefix(id, prefix), stylesheet);
+}
+
+/// Predicate-based variant of [`write_filtered`], used for emitting SVGs
+/// whose keep-set spans multiple prefixes (e.g. a panel frame plus its
+/// shadow) or single elements (icons).
+fn write_filtered_with(
+    writer: &mut XmlWriter,
+    node: Node<'_, '_>,
+    keep: &dyn Fn(&str) -> bool,
+    stylesheet: &str,
+) {
+    if !keep_node_with(node, keep) {
         return;
     }
     if node.tag_name().name() == "defs" {
         write_node(writer, node, stylesheet);
         return;
     }
-    // Slice elements are written wholesale (including their geometry
+    // Matched elements are written wholesale (including their geometry
     // children), mirroring KSvg `boundsOnElement`, which renders the slice's
     // full content.
     if let Some(id) = node.attribute("id")
-        && matches_prefix(id, prefix)
+        && keep(id)
     {
         write_node(writer, node, stylesheet);
         return;
@@ -320,38 +550,15 @@ fn write_filtered(writer: &mut XmlWriter, node: Node<'_, '_>, prefix: &str, styl
     }
     let tag = node.tag_name().name();
     if tag == "style" && node.attribute("id") == Some("current-color-scheme") {
-        writer.start_element("style");
-        let mut seen = Vec::new();
-        for attr in node.attributes() {
-            if seen.contains(&attr.name()) {
-                continue;
-            }
-            seen.push(attr.name());
-            writer.write_attribute(attr.name(), attr.value());
-        }
-        if stylesheet.is_empty() {
-            for child in node.children() {
-                if child.is_text() {
-                    writer.write_text(child.text().unwrap_or_default());
-                }
-            }
-        } else {
-            writer.write_text(stylesheet);
-        }
-        writer.end_element();
+        write_style_block(writer, node, stylesheet);
         return;
     }
     writer.start_element(tag);
-    let mut seen = Vec::new();
     for attr in node.attributes() {
-        if seen.contains(&attr.name()) {
-            continue;
-        }
-        seen.push(attr.name());
-        writer.write_attribute(attr.name(), attr.value());
+        write_attr(writer, &attr);
     }
     for child in node.children() {
-        write_filtered(writer, child, prefix, stylesheet);
+        write_filtered_with(writer, child, keep, stylesheet);
     }
     writer.end_element();
 }
@@ -366,7 +573,7 @@ const FRAME_SLICES: &[&str] = &[
 /// For an empty prefix the base ids are used; for a non-empty prefix the
 /// `prefix-` variants. Everything else (hints, overlays, debug helpers) is
 /// never part of a frame render and must be filtered out.
-fn matches_prefix(id: &str, prefix: &str) -> bool {
+pub(crate) fn matches_prefix(id: &str, prefix: &str) -> bool {
     if prefix.is_empty() {
         FRAME_SLICES.contains(&id)
     } else {
@@ -374,6 +581,25 @@ fn matches_prefix(id: &str, prefix: &str) -> bool {
             .iter()
             .any(|slice| id == &format!("{prefix}-{slice}"))
     }
+}
+
+/// Serialize the `current-color-scheme` style element, replacing its content
+/// with `stylesheet` (or keeping the original text when empty).
+fn write_style_block(writer: &mut XmlWriter, node: Node<'_, '_>, stylesheet: &str) {
+    writer.start_element("style");
+    for attr in node.attributes() {
+        write_attr(writer, &attr);
+    }
+    if stylesheet.is_empty() {
+        for child in node.children() {
+            if child.is_text() {
+                writer.write_text(child.text().unwrap_or_default());
+            }
+        }
+    } else {
+        writer.write_text(stylesheet);
+    }
+    writer.end_element();
 }
 
 /// Serialize a node (and descendants) into the writer, replacing the style
@@ -388,35 +614,12 @@ fn write_node(writer: &mut XmlWriter, node: Node<'_, '_>, stylesheet: &str) {
     }
     let tag = node.tag_name().name();
     if tag == "style" && node.attribute("id") == Some("current-color-scheme") {
-        writer.start_element("style");
-        let mut seen = Vec::new();
-        for attr in node.attributes() {
-            if seen.contains(&attr.name()) {
-                continue;
-            }
-            seen.push(attr.name());
-            writer.write_attribute(attr.name(), attr.value());
-        }
-        if stylesheet.is_empty() {
-            for child in node.children() {
-                if child.is_text() {
-                    writer.write_text(child.text().unwrap_or_default());
-                }
-            }
-        } else {
-            writer.write_text(stylesheet);
-        }
-        writer.end_element();
+        write_style_block(writer, node, stylesheet);
         return;
     }
     writer.start_element(tag);
-    let mut seen = Vec::new();
     for attr in node.attributes() {
-        if seen.contains(&attr.name()) {
-            continue;
-        }
-        seen.push(attr.name());
-        writer.write_attribute(attr.name(), attr.value());
+        write_attr(writer, &attr);
     }
     for child in node.children() {
         write_node(writer, child, stylesheet);
@@ -457,6 +660,41 @@ fn element_exists_prefix(group: &usvg::Group, prefix: &str) -> bool {
         }
         false
     })
+}
+
+/// Find a node by id anywhere in the document.
+fn find_node_by_id<'a, 'input>(root: &'a Node<'a, 'input>, id: &str) -> Option<Node<'a, 'input>> {
+    root.descendants().find(|node| node.attribute("id") == Some(id))
+}
+
+/// Serialize `target` together with its ancestor chain, dropping sibling
+/// subtrees. Ancestor ids are dropped so the same wrapper group is not
+/// emitted with duplicate ids when several slices share a parent.
+fn write_node_path(writer: &mut XmlWriter, node: Node<'_, '_>, target: Node<'_, '_>) {
+    if node == target {
+        write_node(writer, node, "");
+        return;
+    }
+    if node.is_comment() || node.is_text() {
+        return;
+    }
+    if node.tag_name().name() == "defs" || node.tag_name().name() == "style" {
+        return;
+    }
+    if !node.descendants().any(|n| n == target) {
+        return;
+    }
+    writer.start_element(node.tag_name().name());
+    for attr in node.attributes() {
+        if attr.name() == "id" {
+            continue;
+        }
+        write_attr(writer, &attr);
+    }
+    for child in node.children() {
+        write_node_path(writer, child, target);
+    }
+    writer.end_element();
 }
 
 #[cfg(test)]
@@ -568,6 +806,76 @@ mod tests {
         assert!(!text.contains("shadow-hint-top-margin"), "margin hint leaked");
         assert!(!text.contains("shadow-hint-top-inset"), "inset hint leaked");
         assert!(!text.contains("hint-top-margin"), "unprefixed hint leaked");
+    }
+
+    #[test]
+    fn emit_composed_places_slices_with_transforms() {
+        let raw = br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30">
+  <style id="current-color-scheme">.ColorScheme-Background{color:#ff0000;}</style>
+  <defs><linearGradient id="g"/></defs>
+  <g id="layer" transform="translate(5, 5)">
+    <g id="top"><rect width="30" height="4"/></g>
+    <g id="bottom"><rect width="30" height="4"/></g>
+    <g id="left"><rect width="4" height="22"/></g>
+    <g id="right"><rect width="4" height="22"/></g>
+    <g id="center"><rect width="22" height="14"/></g>
+    <g id="topleft"><rect width="4" height="4"/></g>
+    <g id="topright"><rect width="4" height="4"/></g>
+    <g id="bottomleft"><rect width="4" height="4"/></g>
+    <g id="bottomright"><rect width="4" height="4"/></g>
+  </g>
+</svg>"#;
+        let replaced =
+            replace_style_block(raw, ".ColorScheme-Background{color:#112233;}", "t").expect("replace");
+        let tree = usvg::Tree::from_data(&replaced, &usvg::Options::default()).expect("tree");
+        let svg = PlasmaSvg {
+            path: PathBuf::from("t.svg"),
+            xml: replaced,
+            full: tree,
+            frame_trees: HashMap::new(),
+        };
+        let emitted = svg
+            .emit_composed(&[("", (20, 20), (2.0, 3.0))], (20, 20))
+            .expect("emit");
+        let text = String::from_utf8_lossy(&emitted);
+        assert!(text.contains("xmlns=\"http://www.w3.org/2000/svg\""));
+        assert!(text.contains("width=\"20\""));
+        assert!(text.contains("viewBox=\"0 0 20 20\""));
+        assert!(text.contains("translate(2 3)"));
+        assert!(text.contains("id=\"g\""), "defs must survive");
+        assert!(text.contains(".ColorScheme-Background{color:#112233;}"), "colors lost");
+        assert!(!text.contains("id=\"layer\""), "ancestor id must be dropped");
+        assert!(!text.contains("inkscape:"), "editor junk must be dropped");
+        let tree = usvg::Tree::from_data(&emitted, &usvg::Options::default()).expect("parses");
+        // The composed frame fills the canvas: center rect now spans the
+        // region between the borders.
+        assert_eq!(tree.size().width(), 20.0);
+    }
+
+    #[test]
+    fn emit_element_scales_bbox_to_target_size() {
+        let raw = br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">
+  <style id="current-color-scheme">.ColorScheme-Text{color:#000000;}</style>
+  <defs><linearGradient id="g"/></defs>
+  <path id="left-arrow" d="M0 0h16v16H0z" class="ColorScheme-Text"/>
+</svg>"#;
+        let replaced =
+            replace_style_block(raw, ".ColorScheme-Text{color:#aabbcc;}", "t").expect("replace");
+        let tree = usvg::Tree::from_data(&replaced, &usvg::Options::default()).expect("tree");
+        let svg = PlasmaSvg {
+            path: PathBuf::from("t.svg"),
+            xml: replaced,
+            full: tree,
+            frame_trees: HashMap::new(),
+        };
+        let emitted = svg.emit_element("left-arrow", 22, 22).expect("emit");
+        let text = String::from_utf8_lossy(&emitted);
+        assert!(text.contains("xmlns=\"http://www.w3.org/2000/svg\""));
+        assert!(text.contains("width=\"22\""));
+        assert!(text.contains("viewBox=\"0 0 16 16\""));
+        assert!(text.contains("id=\"left-arrow\""));
+        assert!(text.contains("id=\"g\""), "defs must survive");
+        assert!(text.contains(".ColorScheme-Text{color:#aabbcc;}"), "colors lost");
     }
 }
 

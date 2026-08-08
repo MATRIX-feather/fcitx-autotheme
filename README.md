@@ -51,13 +51,23 @@ fcitx-autotheme [OPTIONS]
 
 Options:
   -w, --wait-time <MILLIS>  Debounce wait time in milliseconds [default: 100]
-  -h, --help                Print help
+      --deepen-percent <PERCENT>  Deepen (darken & saturate) highlight/accent colors [default: 0]
+      --format <FORMAT>      Output image format: png or svg [default: png]
+  -h, --help                 Print help
 ```
 
 With a custom debounce (e.g., wait 500 ms before reacting):
 
 ```bash
 fcitx-autotheme --wait-time 500
+```
+
+To generate a vector SVG theme instead of rasterized PNGs (crisp at any DPI;
+fcitx5 renders SVGs natively since mid-2026 — older releases rasterize them
+via gdk-pixbuf, so smaller frames lose sharpness there):
+
+```bash
+fcitx-autotheme --format svg
 ```
 
 ## How it works
@@ -87,9 +97,13 @@ GPL-2.0-or-later):
 1. Resolve the active Plasma theme and its color scheme (the theme's `colors`
    file, or the active KDE scheme from `kdeglobals` / `.colors` files).
 2. Load the theme's SVGs (`dialogs/background`, `widgets/viewitem`,
-   `widgets/arrows`, ...), inject the color scheme into the
-   `current-color-scheme` style block, and render the 9-slice frames to PNGs
-   (`panel.png`, `mask.png`, `highlight.png`, icons) with usvg/resvg.
+   `widgets/arrows`, ...) and inject the color scheme into the
+   `current-color-scheme` style block. In PNG mode the 9-slice frames are
+   rendered to bitmaps (`panel.png`, `mask.png`, `highlight.png`, icons) with
+   usvg/resvg; in SVG mode (`--format svg`) the frames are instead composed
+   into vector documents (`panel.svg`, ...) with per-slice scale transforms,
+   sized so fcitx5 slices them at the same hint-derived `Margin` values as
+   the reference PNGs.
 3. Write `theme.conf` in the fcitx5 classicui format.
 
 ## License

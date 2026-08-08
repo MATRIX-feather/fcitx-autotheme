@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use futures_util::StreamExt;
 use theme_generator::colors::Color;
+use theme_generator::OutputFormat;
 use tokio::signal;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -24,6 +25,27 @@ struct Args {
     /// Deepen (darken & saturate) highlight/accent colors by this many percent (0 = unchanged)
     #[arg(long, default_value_t = 0, value_name = "PERCENT")]
     deepen_percent: u8,
+    /// Output image format: rasterized PNGs (works everywhere) or vector SVGs
+    /// (crisp at any DPI; fcitx5 renders SVGs natively since mid-2026, older
+    /// releases rasterize them via gdk-pixbuf)
+    #[arg(long, value_enum, default_value_t = OutputFormatArg::Png, value_name = "FORMAT")]
+    format: OutputFormatArg,
+}
+
+/// Image format of the generated theme.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum OutputFormatArg {
+    Png,
+    Svg,
+}
+
+impl From<OutputFormatArg> for OutputFormat {
+    fn from(value: OutputFormatArg) -> Self {
+        match value {
+            OutputFormatArg::Png => OutputFormat::Png,
+            OutputFormatArg::Svg => OutputFormat::Svg,
+        }
+    }
 }
 
 /// Proxy trait for XDG Desktop Portal Settings interface.
@@ -238,6 +260,7 @@ async fn main() -> anyhow::Result<()> {
                         last_color_scheme.as_deref(),
                         last_accent_color,
                         args.deepen_percent,
+                        args.format,
                     )
                     .await;
                     triggered = false;
@@ -342,8 +365,9 @@ async fn regenerate_and_reload(
     color_scheme: Option<&str>,
     accent_color: Option<Color>,
     deepen_percent: u8,
+    format: OutputFormatArg,
 ) {
-    if let Err(e) = handle_theme_update(color_scheme, accent_color, deepen_percent) {
+    if let Err(e) = handle_theme_update(color_scheme, accent_color, deepen_percent, format) {
         error!(%e, "theme update failed");
     }
     if let Err(e) = reload_fcitx5(conn).await {
@@ -363,10 +387,12 @@ fn handle_theme_update(
     color_scheme: Option<&str>,
     accent_color: Option<Color>,
     deepen_percent: u8,
+    format: OutputFormatArg,
 ) -> anyhow::Result<()> {
     let output_dir = theme_output_dir()?;
-    let mut generator =
-        theme_generator::ThemeGenerator::new(&output_dir).with_highlight_deepening(deepen_percent);
+    let mut generator = theme_generator::ThemeGenerator::new(&output_dir)
+        .with_highlight_deepening(deepen_percent)
+        .with_format(format.into());
     if let Some(scheme) = color_scheme {
         generator = generator.with_color_scheme_name(scheme);
     }
