@@ -101,3 +101,4 @@ The resulting binary links only against the C standard library.
 | `color` | fcitx `Color` (16-bit channels, `#rrggbb` serialization) |
 
 ## Credits
+- [The original fcitx5-configtool](https://github.com/fcitx/fcitx5-configtool)
