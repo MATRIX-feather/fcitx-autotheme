@@ -1,0 +1,27 @@
+name: Rust
+
+on:
+  push:
+    branches:
+      - '**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install musl target
+      run: rustup target add x86_64-unknown-linux-musl
+    - name: Build
+      run: cargo build --release --target x86_64-unknown-linux-musl
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v7.0.1
+      with:
+        path: target/x86_64-unknown-linux-musl/release/fcitx-autotheme
