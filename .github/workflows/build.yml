@@ -16,6 +16,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Install Breeze theme
+      run: sudo apt install breeze -y
+
     - name: Install musl target
       run: rustup target add x86_64-unknown-linux-musl
 
